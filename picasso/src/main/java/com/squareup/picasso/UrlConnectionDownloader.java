@@ -58,18 +58,26 @@ public class UrlConnectionDownloader implements Downloader {
     HttpURLConnection connection = openConnection(uri);
     connection.setUseCaches(true);
     if (localCacheOnly) {
-      connection.setRequestProperty("Cache-Control", "only-if-cached;max-age=" + Integer.MAX_VALUE);
+      connection.setRequestProperty("Cache-Control", "only-if-cached,max-age=" + Integer.MAX_VALUE);
     }
 
     int responseCode = connection.getResponseCode();
     if (responseCode >= 300) {
       connection.disconnect();
-      return null;
+      throw new ResponseException(responseCode + " " + connection.getResponseMessage(),
+          localCacheOnly, responseCode);
     }
 
+    long contentLength = connection.getHeaderFieldInt("Content-Length", -1);
     boolean fromCache = parseResponseSourceHeader(connection.getHeaderField(RESPONSE_SOURCE));
 
-    return new Response(connection.getInputStream(), fromCache);
+    return new Response(connection.getInputStream(), fromCache, contentLength);
+  }
+
+  @Override public void shutdown() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH && cache != null) {
+      ResponseCacheIcs.close(cache);
+    }
   }
 
   private static void installCacheIfNeeded(Context context) {
@@ -95,6 +103,13 @@ public class UrlConnectionDownloader implements Downloader {
         cache = HttpResponseCache.install(cacheDir, maxSize);
       }
       return cache;
+    }
+
+    static void close(Object cache) {
+      try {
+        ((HttpResponseCache) cache).close();
+      } catch (IOException ignored) {
+      }
     }
   }
 }

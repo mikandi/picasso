@@ -15,69 +15,98 @@
  */
 package com.squareup.picasso;
 
-import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.net.NetworkInfo;
-import android.net.Uri;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import static android.content.ContentResolver.SCHEME_ANDROID_RESOURCE;
-import static android.content.ContentResolver.SCHEME_CONTENT;
-import static android.content.ContentResolver.SCHEME_FILE;
-import static android.provider.ContactsContract.Contacts;
 import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
+import static com.squareup.picasso.Picasso.Priority;
+import static com.squareup.picasso.Picasso.Priority.LOW;
+import static com.squareup.picasso.Utils.OWNER_HUNTER;
+import static com.squareup.picasso.Utils.VERB_DECODED;
+import static com.squareup.picasso.Utils.VERB_EXECUTING;
+import static com.squareup.picasso.Utils.VERB_JOINED;
+import static com.squareup.picasso.Utils.VERB_REMOVED;
+import static com.squareup.picasso.Utils.VERB_TRANSFORMED;
+import static com.squareup.picasso.Utils.getLogIdsForHunter;
+import static com.squareup.picasso.Utils.log;
 
-abstract class BitmapHunter implements Runnable {
-
+class BitmapHunter implements Runnable {
   /**
    * Global lock for bitmap decoding to ensure that we are only are decoding one at a time. Since
    * this will only ever happen in background threads we help avoid excessive memory thrashing as
    * well as potential OOMs. Shamelessly stolen from Volley.
    */
   private static final Object DECODE_LOCK = new Object();
-  private static final String ANDROID_ASSET = "android_asset";
-  protected static final int ASSET_PREFIX_LENGTH =
-      (SCHEME_FILE + ":///" + ANDROID_ASSET + "/").length();
 
+  private static final ThreadLocal<StringBuilder> NAME_BUILDER = new ThreadLocal<StringBuilder>() {
+    @Override protected StringBuilder initialValue() {
+      return new StringBuilder(Utils.THREAD_PREFIX);
+    }
+  };
+
+  private static final AtomicInteger SEQUENCE_GENERATOR = new AtomicInteger();
+
+  private static final RequestHandler ERRORING_HANDLER = new RequestHandler() {
+    @Override public boolean canHandleRequest(Request data) {
+      return true;
+    }
+
+    @Override public Result load(Request data) throws IOException {
+      throw new IllegalStateException("Unrecognized type of request: " + data);
+    }
+  };
+
+  final int sequence;
   final Picasso picasso;
   final Dispatcher dispatcher;
   final Cache cache;
   final Stats stats;
   final String key;
   final Request data;
-  final List<Action> actions;
   final boolean skipMemoryCache;
+  final RequestHandler requestHandler;
 
+  Action action;
+  List<Action> actions;
   Bitmap result;
   Future<?> future;
   Picasso.LoadedFrom loadedFrom;
   Exception exception;
   int exifRotation; // Determined during decoding of original resource.
+  int retryCount;
+  Priority priority;
 
-  BitmapHunter(Picasso picasso, Dispatcher dispatcher, Cache cache, Stats stats, Action action) {
+  BitmapHunter(Picasso picasso, Dispatcher dispatcher, Cache cache, Stats stats, Action action,
+      RequestHandler requestHandler) {
+    this.sequence = SEQUENCE_GENERATOR.incrementAndGet();
     this.picasso = picasso;
     this.dispatcher = dispatcher;
     this.cache = cache;
     this.stats = stats;
+    this.action = action;
     this.key = action.getKey();
-    this.data = action.getData();
+    this.data = action.getRequest();
+    this.priority = action.getPriority();
     this.skipMemoryCache = action.skipCache;
-    this.actions = new ArrayList<Action>(4);
-    attach(action);
-  }
-
-  protected void setExifRotation(int exifRotation) {
-    this.exifRotation = exifRotation;
+    this.requestHandler = requestHandler;
+    this.retryCount = requestHandler.getRetryCount();
   }
 
   @Override public void run() {
     try {
-      Thread.currentThread().setName(Utils.THREAD_PREFIX + data.getName());
+      updateThreadName(data);
+
+      if (picasso.loggingEnabled) {
+        log(OWNER_HUNTER, VERB_EXECUTING, getLogIdsForHunter(this));
+      }
 
       result = hunt();
 
@@ -86,9 +115,19 @@ abstract class BitmapHunter implements Runnable {
       } else {
         dispatcher.dispatchComplete(this);
       }
+    } catch (Downloader.ResponseException e) {
+      if (!e.localCacheOnly || e.responseCode != 504) {
+        exception = e;
+      }
+      dispatcher.dispatchFailed(this);
     } catch (IOException e) {
       exception = e;
       dispatcher.dispatchRetry(this);
+    } catch (OutOfMemoryError e) {
+      StringWriter writer = new StringWriter();
+      stats.createSnapshot().dump(new PrintWriter(writer));
+      exception = new RuntimeException(writer.toString(), e);
+      dispatcher.dispatchFailed(this);
     } catch (Exception e) {
       exception = e;
       dispatcher.dispatchFailed(this);
@@ -97,34 +136,52 @@ abstract class BitmapHunter implements Runnable {
     }
   }
 
-  abstract Bitmap decode(Request data) throws IOException;
-
   Bitmap hunt() throws IOException {
-    Bitmap bitmap;
+    Bitmap bitmap = null;
 
     if (!skipMemoryCache) {
       bitmap = cache.get(key);
       if (bitmap != null) {
         stats.dispatchCacheHit();
         loadedFrom = MEMORY;
+        if (picasso.loggingEnabled) {
+          log(OWNER_HUNTER, VERB_DECODED, data.logId(), "from cache");
+        }
         return bitmap;
       }
     }
 
-    bitmap = decode(data);
+    data.loadFromLocalCacheOnly = (retryCount == 0);
+    RequestHandler.Result result = requestHandler.load(data);
+    if (result != null) {
+      bitmap = result.getBitmap();
+      loadedFrom = result.getLoadedFrom();
+      exifRotation = result.getExifOrientation();
+    }
 
     if (bitmap != null) {
+      if (picasso.loggingEnabled) {
+        log(OWNER_HUNTER, VERB_DECODED, data.logId());
+      }
       stats.dispatchBitmapDecoded(bitmap);
       if (data.needsTransformation() || exifRotation != 0) {
         synchronized (DECODE_LOCK) {
           if (data.needsMatrixTransform() || exifRotation != 0) {
             bitmap = transformResult(data, bitmap, exifRotation);
+            if (picasso.loggingEnabled) {
+              log(OWNER_HUNTER, VERB_TRANSFORMED, data.logId());
+            }
           }
           if (data.hasCustomTransformations()) {
             bitmap = applyCustomTransformations(data.transformations, bitmap);
+            if (picasso.loggingEnabled) {
+              log(OWNER_HUNTER, VERB_TRANSFORMED, data.logId(), "from custom transformations");
+            }
           }
         }
-        stats.dispatchBitmapTransformed(bitmap);
+        if (bitmap != null) {
+          stats.dispatchBitmapTransformed(bitmap);
+        }
       }
     }
 
@@ -132,15 +189,90 @@ abstract class BitmapHunter implements Runnable {
   }
 
   void attach(Action action) {
+    boolean loggingEnabled = picasso.loggingEnabled;
+    Request request = action.request;
+
+    if (this.action == null) {
+      this.action = action;
+      if (loggingEnabled) {
+        if (actions == null || actions.isEmpty()) {
+          log(OWNER_HUNTER, VERB_JOINED, request.logId(), "to empty hunter");
+        } else {
+          log(OWNER_HUNTER, VERB_JOINED, request.logId(), getLogIdsForHunter(this, "to "));
+        }
+      }
+      return;
+    }
+
+    if (actions == null) {
+      actions = new ArrayList<Action>(3);
+    }
+
     actions.add(action);
+
+    if (loggingEnabled) {
+      log(OWNER_HUNTER, VERB_JOINED, request.logId(), getLogIdsForHunter(this, "to "));
+    }
+
+    Priority actionPriority = action.getPriority();
+    if (actionPriority.ordinal() > priority.ordinal()) {
+      priority = actionPriority;
+    }
   }
 
   void detach(Action action) {
-    actions.remove(action);
+    boolean detached = false;
+    if (this.action == action) {
+      this.action = null;
+      detached = true;
+    } else if (actions != null) {
+      detached = actions.remove(action);
+    }
+
+    // The action being detached had the highest priority. Update this
+    // hunter's priority with the remaining actions.
+    if (detached && action.getPriority() == priority) {
+      priority = computeNewPriority();
+    }
+
+    if (picasso.loggingEnabled) {
+      log(OWNER_HUNTER, VERB_REMOVED, action.request.logId(), getLogIdsForHunter(this, "from "));
+    }
+  }
+
+  private Priority computeNewPriority() {
+    Priority newPriority = LOW;
+
+    boolean hasMultiple = actions != null && !actions.isEmpty();
+    boolean hasAny = action != null || hasMultiple;
+
+    // Hunter has no requests, low priority.
+    if (!hasAny) {
+      return newPriority;
+    }
+
+    if (action != null) {
+      newPriority = action.getPriority();
+    }
+
+    if (hasMultiple) {
+      //noinspection ForLoopReplaceableByForEach
+      for (int i = 0, n = actions.size(); i < n; i++) {
+        Priority actionPriority = actions.get(i).getPriority();
+        if (actionPriority.ordinal() > newPriority.ordinal()) {
+          newPriority = actionPriority;
+        }
+      }
+    }
+
+    return newPriority;
   }
 
   boolean cancel() {
-    return actions.isEmpty() && future != null && future.cancel(false);
+    return action == null
+        && (actions == null || actions.isEmpty())
+        && future != null
+        && future.cancel(false);
   }
 
   boolean isCancelled() {
@@ -152,7 +284,16 @@ abstract class BitmapHunter implements Runnable {
   }
 
   boolean shouldRetry(boolean airplaneMode, NetworkInfo info) {
-    return false;
+    boolean hasRetries = retryCount > 0;
+    if (!hasRetries) {
+      return false;
+    }
+    retryCount--;
+    return requestHandler.shouldRetry(airplaneMode, info);
+  }
+
+  boolean supportsReplay() {
+    return requestHandler.supportsReplay();
   }
 
   Bitmap getResult() {
@@ -167,6 +308,14 @@ abstract class BitmapHunter implements Runnable {
     return data;
   }
 
+  Action getAction() {
+    return action;
+  }
+
+  Picasso getPicasso() {
+    return picasso;
+  }
+
   List<Action> getActions() {
     return actions;
   }
@@ -179,53 +328,55 @@ abstract class BitmapHunter implements Runnable {
     return loadedFrom;
   }
 
-  static BitmapHunter forRequest(Context context, Picasso picasso, Dispatcher dispatcher,
-      Cache cache, Stats stats, Action action, Downloader downloader) {
-    if (action.getData().resourceId != 0) {
-      return new ResourceBitmapHunter(context, picasso, dispatcher, cache, stats, action);
-    }
-    Uri uri = action.getData().uri;
-    String scheme = uri.getScheme();
-    if (SCHEME_CONTENT.equals(scheme)) {
-      if (Contacts.CONTENT_URI.getHost().equals(uri.getHost()) //
-          && !uri.getPathSegments().contains(Contacts.Photo.CONTENT_DIRECTORY)) {
-        return new ContactsPhotoBitmapHunter(context, picasso, dispatcher, cache, stats, action);
-      } else {
-        return new ContentProviderBitmapHunter(context, picasso, dispatcher, cache, stats, action);
-      }
-    } else if (SCHEME_FILE.equals(scheme)) {
-      if (!uri.getPathSegments().isEmpty() && ANDROID_ASSET.equals(uri.getPathSegments().get(0))) {
-        return new AssetBitmapHunter(context, picasso, dispatcher, cache, stats, action);
-      }
-      return new FileBitmapHunter(context, picasso, dispatcher, cache, stats, action);
-    } else if (SCHEME_ANDROID_RESOURCE.equals(scheme)) {
-      return new ResourceBitmapHunter(context, picasso, dispatcher, cache, stats, action);
-    } else {
-      return new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
-    }
+  Priority getPriority() {
+    return priority;
   }
 
-  static void calculateInSampleSize(int reqWidth, int reqHeight, BitmapFactory.Options options) {
-    final int height = options.outHeight;
-    final int width = options.outWidth;
-    int sampleSize = 1;
-    if (height > reqHeight || width > reqWidth) {
-      final int heightRatio = Math.round((float) height / (float) reqHeight);
-      final int widthRatio = Math.round((float) width / (float) reqWidth);
-      sampleSize = heightRatio < widthRatio ? heightRatio : widthRatio;
+  static void updateThreadName(Request data) {
+    String name = data.getName();
+
+    StringBuilder builder = NAME_BUILDER.get();
+    builder.ensureCapacity(Utils.THREAD_PREFIX.length() + name.length());
+    builder.replace(Utils.THREAD_PREFIX.length(), builder.length(), name);
+
+    Thread.currentThread().setName(builder.toString());
+  }
+
+  static BitmapHunter forRequest(Picasso picasso, Dispatcher dispatcher, Cache cache, Stats stats,
+      Action action) {
+    Request request = action.getRequest();
+    List<RequestHandler> requestHandlers = picasso.getRequestHandlers();
+
+    // Index-based loop to avoid allocating an iterator.
+    //noinspection ForLoopReplaceableByForEach
+    for (int i = 0, count = requestHandlers.size(); i < count; i++) {
+      RequestHandler requestHandler = requestHandlers.get(i);
+      if (requestHandler.canHandleRequest(request)) {
+        return new BitmapHunter(picasso, dispatcher, cache, stats, action, requestHandler);
+      }
     }
 
-    options.inSampleSize = sampleSize;
-    options.inJustDecodeBounds = false;
+    return new BitmapHunter(picasso, dispatcher, cache, stats, action, ERRORING_HANDLER);
   }
 
   static Bitmap applyCustomTransformations(List<Transformation> transformations, Bitmap result) {
     for (int i = 0, count = transformations.size(); i < count; i++) {
-      Transformation transformation = transformations.get(i);
-      Bitmap newResult = transformation.transform(result);
+      final Transformation transformation = transformations.get(i);
+      Bitmap newResult;
+      try {
+        newResult = transformation.transform(result);
+      } catch (final RuntimeException e) {
+        Picasso.HANDLER.post(new Runnable() {
+          @Override public void run() {
+            throw new RuntimeException(
+                "Transformation " + transformation.key() + " crashed with exception.", e);
+          }
+        });
+        return null;
+      }
 
       if (newResult == null) {
-        StringBuilder builder = new StringBuilder() //
+        final StringBuilder builder = new StringBuilder() //
             .append("Transformation ")
             .append(transformation.key())
             .append(" returned null after ")
@@ -234,20 +385,37 @@ abstract class BitmapHunter implements Runnable {
         for (Transformation t : transformations) {
           builder.append(t.key()).append('\n');
         }
-        throw new NullPointerException(builder.toString());
+        Picasso.HANDLER.post(new Runnable() {
+          @Override public void run() {
+            throw new NullPointerException(builder.toString());
+          }
+        });
+        return null;
       }
 
       if (newResult == result && result.isRecycled()) {
-        throw new IllegalStateException(
-            "Transformation " + transformation.key() + " returned input Bitmap but recycled it.");
+        Picasso.HANDLER.post(new Runnable() {
+          @Override public void run() {
+            throw new IllegalStateException("Transformation "
+                + transformation.key()
+                + " returned input Bitmap but recycled it.");
+          }
+        });
+        return null;
       }
 
       // If the transformation returned a new bitmap ensure they recycled the original.
       if (newResult != result && !result.isRecycled()) {
-        throw new IllegalStateException("Transformation "
-            + transformation.key()
-            + " mutated input Bitmap but failed to recycle the original.");
+        Picasso.HANDLER.post(new Runnable() {
+          @Override public void run() {
+            throw new IllegalStateException("Transformation "
+                + transformation.key()
+                + " mutated input Bitmap but failed to recycle the original.");
+          }
+        });
+        return null;
       }
+
       result = newResult;
     }
     return result;
@@ -298,12 +466,15 @@ abstract class BitmapHunter implements Runnable {
         float heightRatio = targetHeight / (float) inHeight;
         float scale = widthRatio < heightRatio ? widthRatio : heightRatio;
         matrix.preScale(scale, scale);
-      } else if (targetWidth != 0 && targetHeight != 0 //
+      } else if ((targetWidth != 0 || targetHeight != 0) //
           && (targetWidth != inWidth || targetHeight != inHeight)) {
         // If an explicit target size has been specified and they do not match the results bounds,
         // pre-scale the existing matrix appropriately.
-        float sx = targetWidth / (float) inWidth;
-        float sy = targetHeight / (float) inHeight;
+        // Keep aspect ratio if one dimension is set to 0.
+        float sx =
+            targetWidth != 0 ? targetWidth / (float) inWidth : targetHeight / (float) inHeight;
+        float sy =
+            targetHeight != 0 ? targetHeight / (float) inHeight : targetWidth / (float) inWidth;
         matrix.preScale(sx, sy);
       }
     }

@@ -22,32 +22,28 @@ import android.graphics.BitmapFactory;
 import java.io.IOException;
 import java.io.InputStream;
 
+import static android.content.ContentResolver.SCHEME_CONTENT;
 import static com.squareup.picasso.Picasso.LoadedFrom.DISK;
 
-class ContentStreamBitmapHunter extends BitmapHunter {
+class ContentStreamRequestHandler extends RequestHandler {
   final Context context;
 
-  ContentStreamBitmapHunter(Context context, Picasso picasso, Dispatcher dispatcher, Cache cache,
-      Stats stats, Action action) {
-    super(picasso, dispatcher, cache, stats, action);
+  ContentStreamRequestHandler(Context context) {
     this.context = context;
   }
 
-  @Override Bitmap decode(Request data)
-      throws IOException {
-    return decodeContentStream(data);
+  @Override public boolean canHandleRequest(Request data) {
+    return SCHEME_CONTENT.equals(data.uri.getScheme());
   }
 
-  @Override Picasso.LoadedFrom getLoadedFrom() {
-    return DISK;
+  @Override public Result load(Request data) throws IOException {
+    return new Result(decodeContentStream(data), DISK);
   }
 
   protected Bitmap decodeContentStream(Request data) throws IOException {
     ContentResolver contentResolver = context.getContentResolver();
-    BitmapFactory.Options options = null;
-    if (data.hasSize()) {
-      options = new BitmapFactory.Options();
-      options.inJustDecodeBounds = true;
+    final BitmapFactory.Options options = createBitmapOptions(data);
+    if (requiresInSampleSize(options)) {
       InputStream is = null;
       try {
         is = contentResolver.openInputStream(data.uri);
@@ -55,7 +51,7 @@ class ContentStreamBitmapHunter extends BitmapHunter {
       } finally {
         Utils.closeQuietly(is);
       }
-      calculateInSampleSize(data.targetWidth, data.targetHeight, options);
+      calculateInSampleSize(data.targetWidth, data.targetHeight, options, data);
     }
     InputStream is = contentResolver.openInputStream(data.uri);
     try {

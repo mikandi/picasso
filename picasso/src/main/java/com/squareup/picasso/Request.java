@@ -15,14 +15,26 @@
  */
 package com.squareup.picasso;
 
+import android.graphics.Bitmap;
 import android.net.Uri;
+import com.squareup.picasso.Picasso.Priority;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static java.util.Collections.unmodifiableList;
 
 /** Immutable data about an image and the transformations that will be applied to it. */
 public final class Request {
+  private static final long TOO_LONG_LOG = TimeUnit.SECONDS.toNanos(5);
+
+  /** A unique ID for the request. */
+  int id;
+  /** The time that the request was first submitted (in nanos). */
+  long started;
+  /** Whether or not this request should only load from local cache. */
+  boolean loadFromLocalCacheOnly;
+
   /**
    * The image URI.
    * <p>
@@ -35,6 +47,11 @@ public final class Request {
    * This is mutually exclusive with {@link #uri}.
    */
   public final int resourceId;
+  /**
+   * Optional stable key for this request to be used instead of the URI or resource ID when
+   * caching. Two requests with the same value are considered to be for the same resource.
+   */
+  public final String stableKey;
   /** List of custom transformations to be applied after the built-in transformations. */
   public final List<Transformation> transformations;
   /** Target image width for resizing. */
@@ -61,12 +78,18 @@ public final class Request {
   public final float rotationPivotY;
   /** Whether or not {@link #rotationPivotX} and {@link #rotationPivotY} are set. */
   public final boolean hasRotationPivot;
+  /** Target image config for decoding. */
+  public final Bitmap.Config config;
+  /** The priority of this request. */
+  public final Priority priority;
 
-  private Request(Uri uri, int resourceId, List<Transformation> transformations, int targetWidth,
-      int targetHeight, boolean centerCrop, boolean centerInside, float rotationDegrees,
-      float rotationPivotX, float rotationPivotY, boolean hasRotationPivot) {
+  private Request(Uri uri, int resourceId, String stableKey, List<Transformation> transformations,
+      int targetWidth, int targetHeight, boolean centerCrop, boolean centerInside,
+      float rotationDegrees, float rotationPivotX, float rotationPivotY, boolean hasRotationPivot,
+      Bitmap.Config config, Priority priority) {
     this.uri = uri;
     this.resourceId = resourceId;
+    this.stableKey = stableKey;
     if (transformations == null) {
       this.transformations = null;
     } else {
@@ -80,17 +103,70 @@ public final class Request {
     this.rotationPivotX = rotationPivotX;
     this.rotationPivotY = rotationPivotY;
     this.hasRotationPivot = hasRotationPivot;
+    this.config = config;
+    this.priority = priority;
+  }
+
+  @Override public String toString() {
+    final StringBuilder sb = new StringBuilder("Request{");
+    if (resourceId > 0) {
+      sb.append(resourceId);
+    } else {
+      sb.append(uri);
+    }
+    if (transformations != null && !transformations.isEmpty()) {
+      for (Transformation transformation : transformations) {
+        sb.append(' ').append(transformation.key());
+      }
+    }
+    if (stableKey != null) {
+      sb.append(" stableKey(").append(stableKey).append(')');
+    }
+    if (targetWidth > 0) {
+      sb.append(" resize(").append(targetWidth).append(',').append(targetHeight).append(')');
+    }
+    if (centerCrop) {
+      sb.append(" centerCrop");
+    }
+    if (centerInside) {
+      sb.append(" centerInside");
+    }
+    if (rotationDegrees != 0) {
+      sb.append(" rotation(").append(rotationDegrees);
+      if (hasRotationPivot) {
+        sb.append(" @ ").append(rotationPivotX).append(',').append(rotationPivotY);
+      }
+      sb.append(')');
+    }
+    if (config != null) {
+      sb.append(' ').append(config);
+    }
+    sb.append('}');
+
+    return sb.toString();
+  }
+
+  String logId() {
+    long delta = System.nanoTime() - started;
+    if (delta > TOO_LONG_LOG) {
+      return plainId() + '+' + TimeUnit.NANOSECONDS.toSeconds(delta) + 's';
+    }
+    return plainId() + '+' + TimeUnit.NANOSECONDS.toMillis(delta) + "ms";
+  }
+
+  String plainId() {
+    return "[R" + id + ']';
   }
 
   String getName() {
     if (uri != null) {
-      return uri.getPath();
+      return String.valueOf(uri.getPath());
     }
     return Integer.toHexString(resourceId);
   }
 
   public boolean hasSize() {
-    return targetWidth != 0;
+    return targetWidth != 0 || targetHeight != 0;
   }
 
   boolean needsTransformation() {
@@ -98,7 +174,7 @@ public final class Request {
   }
 
   boolean needsMatrixTransform() {
-    return targetWidth != 0 || rotationDegrees != 0;
+    return hasSize() || rotationDegrees != 0;
   }
 
   boolean hasCustomTransformations() {
@@ -113,6 +189,7 @@ public final class Request {
   public static final class Builder {
     private Uri uri;
     private int resourceId;
+    private String stableKey;
     private int targetWidth;
     private int targetHeight;
     private boolean centerCrop;
@@ -122,6 +199,8 @@ public final class Request {
     private float rotationPivotY;
     private boolean hasRotationPivot;
     private List<Transformation> transformations;
+    private Bitmap.Config config;
+    private Priority priority;
 
     /** Start building a request using the specified {@link Uri}. */
     public Builder(Uri uri) {
@@ -141,6 +220,7 @@ public final class Request {
     private Builder(Request request) {
       uri = request.uri;
       resourceId = request.resourceId;
+      stableKey = request.stableKey;
       targetWidth = request.targetWidth;
       targetHeight = request.targetHeight;
       centerCrop = request.centerCrop;
@@ -152,6 +232,8 @@ public final class Request {
       if (request.transformations != null) {
         transformations = new ArrayList<Transformation>(request.transformations);
       }
+      config = request.config;
+      priority = request.priority;
     }
 
     boolean hasImage() {
@@ -159,7 +241,11 @@ public final class Request {
     }
 
     boolean hasSize() {
-      return targetWidth != 0;
+      return targetWidth != 0 || targetHeight != 0;
+    }
+
+    boolean hasPriority() {
+      return priority != null;
     }
 
     /**
@@ -190,13 +276,28 @@ public final class Request {
       return this;
     }
 
-    /** Resize the image to the specified size in pixels. */
+    /**
+     * Set the stable key to be used instead of the URI or resource ID when caching.
+     * Two requests with the same value are considered to be for the same resource.
+     */
+    public Builder stableKey(String stableKey) {
+      this.stableKey = stableKey;
+      return this;
+    }
+
+    /**
+     * Resize the image to the specified size in pixels.
+     * Use 0 as desired dimension to resize keeping aspect ratio.
+     */
     public Builder resize(int targetWidth, int targetHeight) {
-      if (targetWidth <= 0) {
-        throw new IllegalArgumentException("Width must be positive number.");
+      if (targetWidth < 0) {
+        throw new IllegalArgumentException("Width must be positive number or 0.");
       }
-      if (targetHeight <= 0) {
-        throw new IllegalArgumentException("Height must be positive number.");
+      if (targetHeight < 0) {
+        throw new IllegalArgumentException("Height must be positive number or 0.");
+      }
+      if (targetHeight == 0 && targetWidth == 0) {
+        throw new IllegalArgumentException("At least one dimension has to be positive number.");
       }
       this.targetWidth = targetWidth;
       this.targetHeight = targetHeight;
@@ -273,14 +374,35 @@ public final class Request {
       return this;
     }
 
+    /** Decode the image using the specified config. */
+    public Builder config(Bitmap.Config config) {
+      this.config = config;
+      return this;
+    }
+
+    /** Execute request using the specified priority. */
+    public Builder priority(Priority priority) {
+      if (priority == null) {
+        throw new IllegalArgumentException("Priority invalid.");
+      }
+      if (this.priority != null) {
+        throw new IllegalStateException("Priority already set.");
+      }
+      this.priority = priority;
+      return this;
+    }
+
     /**
      * Add a custom transformation to be applied to the image.
-     * <p/>
+     * <p>
      * Custom transformations will always be run after the built-in transformations.
      */
     public Builder transform(Transformation transformation) {
       if (transformation == null) {
         throw new IllegalArgumentException("Transformation must not be null.");
+      }
+      if (transformation.key() == null) {
+        throw new IllegalArgumentException("Transformation key must not be null.");
       }
       if (transformations == null) {
         transformations = new ArrayList<Transformation>(2);
@@ -294,14 +416,20 @@ public final class Request {
       if (centerInside && centerCrop) {
         throw new IllegalStateException("Center crop and center inside can not be used together.");
       }
-      if (centerCrop && targetWidth == 0) {
-        throw new IllegalStateException("Center crop requires calling resize.");
+      if (centerCrop && (targetWidth == 0 && targetHeight == 0)) {
+        throw new IllegalStateException(
+            "Center crop requires calling resize with positive width and height.");
       }
-      if (centerInside && targetWidth == 0) {
-        throw new IllegalStateException("Center inside requires calling resize.");
+      if (centerInside && (targetWidth == 0 && targetHeight == 0)) {
+        throw new IllegalStateException(
+            "Center inside requires calling resize with positive width and height.");
       }
-      return new Request(uri, resourceId, transformations, targetWidth, targetHeight, centerCrop,
-          centerInside, rotationDegrees, rotationPivotX, rotationPivotY, hasRotationPivot);
+      if (priority == null) {
+        priority = Priority.NORMAL;
+      }
+      return new Request(uri, resourceId, stableKey, transformations, targetWidth, targetHeight,
+          centerCrop, centerInside, rotationDegrees, rotationPivotX, rotationPivotY,
+          hasRotationPivot, config, priority);
     }
   }
 }

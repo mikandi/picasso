@@ -20,23 +20,30 @@ import android.app.ActivityManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
-import android.os.Build;
 import android.os.Looper;
 import android.os.Process;
 import android.os.StatFs;
 import android.provider.Settings;
+import android.util.Log;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.List;
 import java.util.concurrent.ThreadFactory;
 
 import static android.content.Context.ACTIVITY_SERVICE;
 import static android.content.pm.ApplicationInfo.FLAG_LARGE_HEAP;
 import static android.os.Build.VERSION.SDK_INT;
+import static android.os.Build.VERSION_CODES.HONEYCOMB;
 import static android.os.Build.VERSION_CODES.HONEYCOMB_MR1;
 import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
 import static android.provider.Settings.System.AIRPLANE_MODE_ON;
+import static com.squareup.picasso.Picasso.TAG;
+import static java.lang.String.format;
 
 final class Utils {
   static final String THREAD_PREFIX = "Picasso-";
@@ -47,6 +54,47 @@ final class Utils {
   private static final int KEY_PADDING = 50; // Determined by exact science.
   private static final int MIN_DISK_CACHE_SIZE = 5 * 1024 * 1024; // 5MB
   private static final int MAX_DISK_CACHE_SIZE = 50 * 1024 * 1024; // 50MB
+
+  /** Thread confined to main thread for key creation. */
+  static final StringBuilder MAIN_THREAD_KEY_BUILDER = new StringBuilder();
+
+  /** Logging */
+  static final String OWNER_MAIN = "Main";
+  static final String OWNER_DISPATCHER = "Dispatcher";
+  static final String OWNER_HUNTER = "Hunter";
+  static final String VERB_CREATED = "created";
+  static final String VERB_CHANGED = "changed";
+  static final String VERB_IGNORED = "ignored";
+  static final String VERB_ENQUEUED = "enqueued";
+  static final String VERB_CANCELED = "canceled";
+  static final String VERB_BATCHED = "batched";
+  static final String VERB_RETRYING = "retrying";
+  static final String VERB_EXECUTING = "executing";
+  static final String VERB_DECODED = "decoded";
+  static final String VERB_TRANSFORMED = "transformed";
+  static final String VERB_JOINED = "joined";
+  static final String VERB_REMOVED = "removed";
+  static final String VERB_DELIVERED = "delivered";
+  static final String VERB_REPLAYING = "replaying";
+  static final String VERB_COMPLETED = "completed";
+  static final String VERB_ERRORED = "errored";
+  static final String VERB_PAUSED = "paused";
+  static final String VERB_RESUMED = "resumed";
+
+  /* WebP file header
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |      'R'      |      'I'      |      'F'      |      'F'      |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                           File Size                           |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |      'W'      |      'E'      |      'B'      |      'P'      |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+  */
+  private static final int WEBP_FILE_HEADER_SIZE = 12;
+  private static final String WEBP_FILE_HEADER_RIFF = "RIFF";
+  private static final String WEBP_FILE_HEADER_WEBP = "WEBP";
 
   private Utils() {
     // No instances.
@@ -66,20 +114,65 @@ final class Utils {
   }
 
   static void checkNotMain() {
-    if (Looper.getMainLooper().getThread() == Thread.currentThread()) {
+    if (isMain()) {
       throw new IllegalStateException("Method call should not happen from the main thread.");
     }
   }
 
-  static String createKey(Request data) {
-    StringBuilder builder;
+  static void checkMain() {
+    if (!isMain()) {
+      throw new IllegalStateException("Method call should happen from the main thread.");
+    }
+  }
 
-    if (data.uri != null) {
+  static boolean isMain() {
+    return Looper.getMainLooper().getThread() == Thread.currentThread();
+  }
+
+  static String getLogIdsForHunter(BitmapHunter hunter) {
+    return getLogIdsForHunter(hunter, "");
+  }
+
+  static String getLogIdsForHunter(BitmapHunter hunter, String prefix) {
+    StringBuilder builder = new StringBuilder(prefix);
+    Action action = hunter.getAction();
+    if (action != null) {
+      builder.append(action.request.logId());
+    }
+    List<Action> actions = hunter.getActions();
+    if (actions != null) {
+      for (int i = 0, count = actions.size(); i < count; i++) {
+        if (i > 0 || action != null) builder.append(", ");
+        builder.append(actions.get(i).request.logId());
+      }
+    }
+    return builder.toString();
+  }
+
+  static void log(String owner, String verb, String logId) {
+    log(owner, verb, logId, "");
+  }
+
+  static void log(String owner, String verb, String logId, String extras) {
+    Log.d(TAG, format("%1$-11s %2$-12s %3$s %4$s", owner, verb, logId, extras));
+  }
+
+  static String createKey(Request data) {
+    String result = createKey(data, MAIN_THREAD_KEY_BUILDER);
+    MAIN_THREAD_KEY_BUILDER.setLength(0);
+    return result;
+  }
+
+  static String createKey(Request data, StringBuilder builder) {
+    if (data.stableKey != null) {
+      builder.ensureCapacity(data.stableKey.length() + KEY_PADDING);
+      builder.append(data.stableKey);
+    } else if (data.uri != null) {
       String path = data.uri.toString();
-      builder = new StringBuilder(path.length() + KEY_PADDING);
+      builder.ensureCapacity(path.length() + KEY_PADDING);
       builder.append(path);
     } else {
-      builder = new StringBuilder(KEY_PADDING);
+      builder.ensureCapacity(KEY_PADDING);
       builder.append(data.resourceId);
     }
     builder.append('\n');
@@ -91,7 +184,7 @@ final class Utils {
       }
       builder.append('\n');
     }
-    if (data.targetWidth != 0) {
+    if (data.hasSize()) {
       builder.append("resize:").append(data.targetWidth).append('x').append(data.targetHeight);
       builder.append('\n');
     }
@@ -140,17 +233,47 @@ final class Utils {
   }
 
   static Downloader createDefaultDownloader(Context context) {
+    boolean okUrlFactory = false;
+    try {
+      Class.forName("com.squareup.okhttp.OkUrlFactory");
+      okUrlFactory = true;
+    } catch (ClassNotFoundException ignored) {
+    }
+
+    boolean okHttpClient = false;
     try {
       Class.forName("com.squareup.okhttp.OkHttpClient");
-      return OkHttpLoaderCreator.create(context);
-    } catch (ClassNotFoundException e) {
-      return new UrlConnectionDownloader(context);
+      okHttpClient = true;
+    } catch (ClassNotFoundException ignored) {
     }
+
+    if (okHttpClient != okUrlFactory) {
+      throw new RuntimeException(""
+          + "Picasso detected an unsupported OkHttp on the classpath.\n"
+          + "To use OkHttp with this version of Picasso, you'll need:\n"
+          + "1. com.squareup.okhttp:okhttp:1.6.0 (or newer)\n"
+          + "2. com.squareup.okhttp:okhttp-urlconnection:1.6.0 (or newer)\n"
+          + "Note that OkHttp 2.0.0+ is supported!");
+    }
+
+    return okHttpClient
+        ? OkHttpLoaderCreator.create(context)
+        : new UrlConnectionDownloader(context);
+  }
+
+  static void sneakyRethrow(Throwable t) {
+    Utils.<Error>sneakyThrow2(t);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <T extends Throwable> void sneakyThrow2(Throwable t) throws T {
+    throw (T) t;
   }
 
   static File createDefaultCacheDir(Context context) {
     File cache = new File(context.getApplicationContext().getCacheDir(), PICASSO_CACHE);
     if (!cache.exists()) {
+      //noinspection ResultOfMethodCallIgnored
       cache.mkdirs();
     }
     return cache;
@@ -172,10 +295,10 @@ final class Utils {
   }
 
   static int calculateMemoryCacheSize(Context context) {
-    ActivityManager am = (ActivityManager) context.getSystemService(ACTIVITY_SERVICE);
+    ActivityManager am = getService(context, ACTIVITY_SERVICE);
     boolean largeHeap = (context.getApplicationInfo().flags & FLAG_LARGE_HEAP) != 0;
     int memoryClass = am.getMemoryClass();
-    if (largeHeap && Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+    if (largeHeap && SDK_INT >= HONEYCOMB) {
       memoryClass = ActivityManagerHoneycomb.getLargeMemoryClass(am);
     }
     // Target ~15% of the available heap.
@@ -184,14 +307,90 @@ final class Utils {
 
   static boolean isAirplaneModeOn(Context context) {
     ContentResolver contentResolver = context.getContentResolver();
-    return Settings.System.getInt(contentResolver, AIRPLANE_MODE_ON, 0) != 0;
+    try {
+      return Settings.System.getInt(contentResolver, AIRPLANE_MODE_ON, 0) != 0;
+    } catch (NullPointerException e) {
+      // https://github.com/square/picasso/issues/761, some devices might crash here, assume that
+      // airplane mode is off.
+      return false;
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  static <T> T getService(Context context, String service) {
+    return (T) context.getSystemService(service);
   }
 
   static boolean hasPermission(Context context, String permission) {
     return context.checkCallingOrSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
   }
 
-  @TargetApi(Build.VERSION_CODES.HONEYCOMB)
+  static byte[] toByteArray(InputStream input) throws IOException {
+    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+    byte[] buffer = new byte[1024 * 4];
+    int n;
+    while (-1 != (n = input.read(buffer))) {
+      byteArrayOutputStream.write(buffer, 0, n);
+    }
+    return byteArrayOutputStream.toByteArray();
+  }
+
+  static boolean isWebPFile(InputStream stream) throws IOException {
+    byte[] fileHeaderBytes = new byte[WEBP_FILE_HEADER_SIZE];
+    boolean isWebPFile = false;
+    if (stream.read(fileHeaderBytes, 0, WEBP_FILE_HEADER_SIZE) == WEBP_FILE_HEADER_SIZE) {
+      // If a file's header starts with RIFF and end with WEBP, the file is a WebP file
+      isWebPFile = WEBP_FILE_HEADER_RIFF.equals(new String(fileHeaderBytes, 0, 4, "US-ASCII"))
+          && WEBP_FILE_HEADER_WEBP.equals(new String(fileHeaderBytes, 8, 4, "US-ASCII"));
+    }
+    return isWebPFile;
+  }
+
+  static int getResourceId(Resources resources, Request data) throws FileNotFoundException {
+    if (data.resourceId != 0 || data.uri == null) {
+      return data.resourceId;
+    }
+
+    String pkg = data.uri.getAuthority();
+    if (pkg == null) throw new FileNotFoundException("No package provided: " + data.uri);
+
+    int id;
+    List<String> segments = data.uri.getPathSegments();
+    if (segments == null || segments.isEmpty()) {
+      throw new FileNotFoundException("No path segments: " + data.uri);
+    } else if (segments.size() == 1) {
+      try {
+        id = Integer.parseInt(segments.get(0));
+      } catch (NumberFormatException e) {
+        throw new FileNotFoundException("Last path segment is not a resource ID: " + data.uri);
+      }
+    } else if (segments.size() == 2) {
+      String type = segments.get(0);
+      String name = segments.get(1);
+
+      id = resources.getIdentifier(name, type, pkg);
+    } else {
+      throw new FileNotFoundException("More than two path segments: " + data.uri);
+    }
+    return id;
+  }
+
+  static Resources getResources(Context context, Request data) throws FileNotFoundException {
+    if (data.resourceId != 0 || data.uri == null) {
+      return context.getResources();
+    }
+
+    String pkg = data.uri.getAuthority();
+    if (pkg == null) throw new FileNotFoundException("No package provided: " + data.uri);
+    try {
+      PackageManager pm = context.getPackageManager();
+      return pm.getResourcesForApplication(pkg);
+    } catch (PackageManager.NameNotFoundException e) {
+      throw new FileNotFoundException("Unable to obtain resources for package: " + data.uri);
+    }
+  }
+
+  @TargetApi(HONEYCOMB)
   private static class ActivityManagerHoneycomb {
     static int getLargeMemoryClass(ActivityManager activityManager) {
       return activityManager.getLargeMemoryClass();
@@ -216,7 +415,7 @@ final class Utils {
     }
   }
 
-  @TargetApi(Build.VERSION_CODES.HONEYCOMB_MR1)
+  @TargetApi(HONEYCOMB_MR1)
   private static class BitmapHoneycombMR1 {
     static int getByteCount(Bitmap bitmap) {
       return bitmap.getByteCount();

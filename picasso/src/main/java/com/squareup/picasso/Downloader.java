@@ -35,11 +35,30 @@ public interface Downloader {
    */
   Response load(Uri uri, boolean localCacheOnly) throws IOException;
 
+  /**
+   * Allows to perform a clean up for this {@link Downloader} including closing the disk cache and
+   * other resources.
+   */
+  void shutdown();
+
+  /** Thrown for non-2XX responses. */
+  class ResponseException extends IOException {
+    final boolean localCacheOnly;
+    final int responseCode;
+
+    public ResponseException(String message, boolean localCacheOnly, int responseCode) {
+      super(message);
+      this.localCacheOnly = localCacheOnly;
+      this.responseCode = responseCode;
+    }
+  }
+
   /** Response stream or bitmap and info. */
   class Response {
     final InputStream stream;
     final Bitmap bitmap;
     final boolean cached;
+    final long contentLength;
 
     /**
      * Response image and info.
@@ -54,6 +73,7 @@ public interface Downloader {
       this.stream = null;
       this.bitmap = bitmap;
       this.cached = loadedFromCache;
+      this.contentLength = -1;
     }
 
     /**
@@ -61,14 +81,44 @@ public interface Downloader {
      *
      * @param stream Image data stream.
      * @param loadedFromCache {@code true} if the source of the stream is from a local disk cache.
+     * @deprecated Use {@link Response#Response(java.io.InputStream, boolean, long)} instead.
      */
+    @Deprecated @SuppressWarnings("UnusedDeclaration")
     public Response(InputStream stream, boolean loadedFromCache) {
+      this(stream, loadedFromCache, -1);
+    }
+
+    /**
+     * Response image and info.
+     *
+     * @param bitmap Image.
+     * @param loadedFromCache {@code true} if the source of the image is from a local disk cache.
+     * @param contentLength The content length of the response, typically derived by the
+     * {@code Content-Length} HTTP header.
+     * @deprecated The {@code contentLength} argument value is ignored. Use {@link #Response(Bitmap,
+     * boolean)}.
+     */
+    @Deprecated @SuppressWarnings("UnusedDeclaration")
+    public Response(Bitmap bitmap, boolean loadedFromCache, long contentLength) {
+      this(bitmap, loadedFromCache);
+    }
+
+    /**
+     * Response stream and info.
+     *
+     * @param stream Image data stream.
+     * @param loadedFromCache {@code true} if the source of the stream is from a local disk cache.
+     * @param contentLength The content length of the response, typically derived by the
+     * {@code Content-Length} HTTP header.
+     */
+    public Response(InputStream stream, boolean loadedFromCache, long contentLength) {
       if (stream == null) {
         throw new IllegalArgumentException("Stream may not be null.");
       }
       this.stream = stream;
       this.bitmap = null;
       this.cached = loadedFromCache;
+      this.contentLength = contentLength;
     }
 
     /**
@@ -87,6 +137,11 @@ public interface Downloader {
      */
     public Bitmap getBitmap() {
       return bitmap;
+    }
+
+    /** Content length of the response. Only valid when used with {@link #getInputStream()}. */
+    public long getContentLength() {
+      return contentLength;
     }
   }
 }

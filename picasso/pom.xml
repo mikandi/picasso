@@ -6,7 +6,7 @@
   <parent>
     <groupId>com.squareup.picasso</groupId>
     <artifactId>picasso-parent</artifactId>
-    <version>2.1.2-SNAPSHOT</version>
+    <version>2.4.1-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 
@@ -17,6 +17,11 @@
     <dependency>
       <groupId>com.squareup.okhttp</groupId>
       <artifactId>okhttp</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>com.squareup.okhttp</groupId>
+      <artifactId>okhttp-urlconnection</artifactId>
       <optional>true</optional>
     </dependency>
 
@@ -46,7 +51,7 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>com.google.mockwebserver</groupId>
+      <groupId>com.squareup.okhttp</groupId>
       <artifactId>mockwebserver</artifactId>
       <scope>test</scope>
     </dependency>

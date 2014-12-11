@@ -15,11 +15,11 @@
  */
 package com.squareup.picasso;
 
-import android.content.Context;
 import android.graphics.Bitmap;
 import android.net.NetworkInfo;
 import android.net.Uri;
 import java.io.IOException;
+import java.io.InputStream;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -30,83 +30,104 @@ import org.robolectric.annotation.Config;
 import static android.graphics.Bitmap.Config.ARGB_8888;
 import static com.squareup.picasso.TestUtils.URI_1;
 import static com.squareup.picasso.TestUtils.URI_KEY_1;
+import static com.squareup.picasso.TestUtils.mockInputStream;
 import static com.squareup.picasso.TestUtils.mockNetworkInfo;
 import static org.fest.assertions.api.Assertions.assertThat;
+import static org.fest.assertions.api.Assertions.fail;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.initMocks;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE)
-public class NetworkBitmapHunterTest {
+public class NetworkRequestHandlerTest {
 
-  @Mock Context context;
   @Mock Picasso picasso;
   @Mock Cache cache;
   @Mock Stats stats;
   @Mock Dispatcher dispatcher;
   @Mock Downloader downloader;
+  NetworkRequestHandler networkHandler;
 
   @Before public void setUp() throws Exception {
     initMocks(this);
+    networkHandler = new NetworkRequestHandler(downloader, stats);
     when(downloader.load(any(Uri.class), anyBoolean())).thenReturn(mock(Downloader.Response.class));
   }
 
   @Test public void doesNotForceLocalCacheOnlyWithAirplaneModeOffAndRetryCount() throws Exception {
     Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
-    hunter.decode(action.getData());
+    networkHandler.load(action.getRequest());
     verify(downloader).load(URI_1, false);
   }
 
   @Test public void withZeroRetryCountForcesLocalCacheOnly() throws Exception {
     Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
+    BitmapHunter hunter = new BitmapHunter(picasso, dispatcher, cache, stats, action, networkHandler);
     hunter.retryCount = 0;
-    hunter.decode(action.getData());
+    hunter.hunt();
     verify(downloader).load(URI_1, true);
   }
 
   @Test public void shouldRetryTwiceWithAirplaneModeOffAndNoNetworkInfo() throws Exception {
     Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
+    BitmapHunter hunter = new BitmapHunter(picasso, dispatcher, cache, stats, action, networkHandler);
     assertThat(hunter.shouldRetry(false, null)).isTrue();
     assertThat(hunter.shouldRetry(false, null)).isTrue();
     assertThat(hunter.shouldRetry(false, null)).isFalse();
   }
 
   @Test public void shouldRetryWithUnknownNetworkInfo() throws Exception {
-    Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
-    assertThat(hunter.shouldRetry(false, null)).isTrue();
-    assertThat(hunter.shouldRetry(true, null)).isTrue();
+    assertThat(networkHandler.shouldRetry(false, null)).isTrue();
+    assertThat(networkHandler.shouldRetry(true, null)).isTrue();
   }
 
   @Test public void shouldRetryWithConnectedNetworkInfo() throws Exception {
-    Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
     NetworkInfo info = mockNetworkInfo();
-    when(info.isConnectedOrConnecting()).thenReturn(true);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
-    assertThat(hunter.shouldRetry(false, info)).isTrue();
-    assertThat(hunter.shouldRetry(true, info)).isTrue();
+    when(info.isConnected()).thenReturn(true);
+    assertThat(networkHandler.shouldRetry(false, info)).isTrue();
+    assertThat(networkHandler.shouldRetry(true, info)).isTrue();
   }
 
   @Test public void shouldNotRetryWithDisconnectedNetworkInfo() throws Exception {
-    Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
     NetworkInfo info = mockNetworkInfo();
     when(info.isConnectedOrConnecting()).thenReturn(false);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, downloader);
-    assertThat(hunter.shouldRetry(false, info)).isFalse();
-    assertThat(hunter.shouldRetry(true, info)).isFalse();
+    assertThat(networkHandler.shouldRetry(false, info)).isFalse();
+    assertThat(networkHandler.shouldRetry(true, info)).isFalse();
+  }
+
+  @Test public void noCacheAndKnownContentLengthDispatchToStats() throws Exception {
+    Downloader.Response response = new Downloader.Response(mockInputStream(), false, 1024);
+    when(downloader.load(any(Uri.class), anyBoolean())).thenReturn(response);
+    Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
+    networkHandler.load(action.getRequest());
+    verify(stats).dispatchDownloadFinished(response.contentLength);
+  }
+
+  @Test public void unknownContentLengthThrows() throws Exception {
+    InputStream stream = mockInputStream();
+    Downloader.Response response = new Downloader.Response(stream, false, 0);
+    when(downloader.load(any(Uri.class), anyBoolean())).thenReturn(response);
+    Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
+    try {
+      networkHandler.load(action.getRequest());
+      fail("Should have thrown IOException.");
+    } catch(IOException expected) {
+      verifyZeroInteractions(stats);
+      verify(stream).close();
+    }
+  }
+
+  @Test public void cachedResponseDoesNotDispatchToStats() throws Exception {
+    Downloader.Response response = new Downloader.Response(mockInputStream(), true, 1024);
+    when(downloader.load(any(Uri.class), anyBoolean())).thenReturn(response);
+    Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
+    networkHandler.load(action.getRequest());
+    verifyZeroInteractions(stats);
   }
 
   @Test public void downloaderCanReturnBitmapDirectly() throws Exception {
@@ -115,12 +136,14 @@ public class NetworkBitmapHunterTest {
       @Override public Response load(Uri uri, boolean localCacheOnly) throws IOException {
         return new Response(expected, false);
       }
+
+      @Override public void shutdown() {
+      }
     };
     Action action = TestUtils.mockAction(URI_KEY_1, URI_1);
-    NetworkBitmapHunter hunter =
-        new NetworkBitmapHunter(picasso, dispatcher, cache, stats, action, bitmapDownloader);
+    NetworkRequestHandler customNetworkHandler = new NetworkRequestHandler(bitmapDownloader, stats);
 
-    Bitmap actual = hunter.decode(action.getData());
+    Bitmap actual = customNetworkHandler.load(action.getRequest()).getBitmap();
     assertThat(actual).isSameAs(expected);
   }
 }

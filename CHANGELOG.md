@@ -1,6 +1,91 @@
 Change Log
 ==========
 
+Version 2.4 *(2014-11-04)*
+--------------------------
+
+ * New `RequestHandler` beta API adds support for custom bitmap loading.
+ * `priority` API for setting request priority. By default `fetch()` requests are set to `Priority.LOW`.
+ * Requests can now be grouped with a `tag` and can be batch paused, resumed, or canceled.
+ * Resizing with either height or width of 0 will now maintain aspect ratio.
+ * `Picasso.setSingletonInstance` allows setting the global Picasso instance returned from `Picasso.with`.
+ * Request `stableKey` provides an override value for the URI or resource ID when caching.
+ * Fix: Properly calculate sample size for requests with `centerInside()`.
+ * Fix: `ConcurrentModificationException` could occur in the `Dispatcher` when submitting a request.
+ * Fix: Correctly log when a request was canceled due to garbage collection.
+ * Fix: Provide correct target for `RemoteViews` requests.
+ * Fix: Propagate exceptions thrown from custom transformations.
+ * Fix: Invoking `shutdown()` now will close the disk cache.
+
+
+Version 2.3.4 *(2014-08-25)*
+----------------------------
+
+ * Fix: Revert fail fast when missing internet permission.
+ * Fix: Account for null paths when naming a Request.
+ * Add API to allow canceling of remote views requests.
+
+
+Version 2.3.3 *(2014-07-21)*
+----------------------------
+
+ * Fix: Crash when attempting to swap dimension for EXIF transformation.
+ * Fix: Properly honor alpha value in PicassoDrawable.
+ * Fix: Use `getWidth()` and `getHeight()` instead of `getMeasuredWidth()` and `getMeasuredHeight()` during `fit()`.
+
+
+Version 2.3.2 *(2014-06-05)*
+----------------------------
+
+ * Fix: Correctly invalidate PicassoDrawable for GB.
+ * Fix: Attempt to decode responses with missing `Content-Length` header.
+ * Fix: Prevent race condition to initial `with()` call.
+
+
+Version 2.3.1 *(2014-05-29)*
+----------------------------
+
+ * Fix: Deprecated Response constructor used 0 for content-length.
+ 
+
+Version 2.3.0 *(2014-05-29)*
+----------------------------
+
+ * Requests will now be automatically replayed if they failed due to network errors.
+ * Add API for logging. This is mostly useful for debugging Picasso itself.
+ * Add API for loading images into remote views (notifications and widgets).
+ * Stats now provide download statistics.
+ * Updated to use Pollexor 2.0.
+ * When using OkHttp version 1.6 or newer (including 2.0+) is now required.
+ * `MediaStoreBitmapHunter` now properly returns video thumbnails if requested URI is for a video.
+ * All API calls now properly validate the current thread they must run on.
+ * Performance: Various optimizations for reducing object allocations.
+ * Fix: Stats were incorrectly invoked even if the bitmap failed to decode.
+ * Fix: Handle `null` intent case in network broadcast receiver extras.
+ * Fix: `Target` now correctly invokes bitmap failed if an error drawable or resource is supplied.
+
+
+Version 2.2.0 *(2014-01-31)*
+----------------------------
+
+ * Add support decoding various contact photo URIs. 
+ * Add support for loading `android.resource` URIs (e.g. load assets from other packages).
+ * Add support for MICRO/MINI thumbnails for media images.
+ * Add API to supply custom `Bitmap.Config` for decoding.
+ * Performance: Reduce GC by reusing same `StringBuilder` instance on main thread for key creation.
+ * Performance: Reduce default buffer allocation to 4k for `MarkableInputStream`.
+ * Fix: Detect and decode WebP streams from byte array.
+ * Fix: Non-200 HTTP responses will now display error drawable if supplied.
+ * Fix: All exceptions during decode will now dispatch a failure.
+ * Fix: Catch `OutOfMemory` errors, dispatch a failure, and output stats in logcat.
+ * Fix: `fit()` now handles cases where either width or height was not zero.
+ * Fix: Prevent crash from `null` intent on `NetworkBroadcastReceiver`.
+ * Fix: Honor exif orientation when no custom transformations supplied.
+ * Fix: Exceptions during transformations propagate to the main thread. 
+ * Fix: Correct skia decoding problem during underflow.
+ * Fix: Placeholder uses full bounds.
+
+
 Version 2.1.1 *(2013-10-04)*
 ----------------------------
 

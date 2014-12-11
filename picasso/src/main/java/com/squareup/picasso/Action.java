@@ -20,37 +20,43 @@ import android.graphics.drawable.Drawable;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
 
+import static com.squareup.picasso.Picasso.Priority;
+
 abstract class Action<T> {
-  static class RequestWeakReference<T> extends WeakReference<T> {
+  static class RequestWeakReference<M> extends WeakReference<M> {
     final Action action;
 
-    public RequestWeakReference(Action action, T referent, ReferenceQueue<? super T> q) {
+    public RequestWeakReference(Action action, M referent, ReferenceQueue<? super M> q) {
       super(referent, q);
       this.action = action;
     }
   }
 
   final Picasso picasso;
-  final Request data;
+  final Request request;
   final WeakReference<T> target;
   final boolean skipCache;
   final boolean noFade;
   final int errorResId;
   final Drawable errorDrawable;
   final String key;
+  final Object tag;
 
+  boolean willReplay;
   boolean cancelled;
 
-  Action(Picasso picasso, T target, Request data, boolean skipCache, boolean noFade,
-      int errorResId, Drawable errorDrawable, String key) {
+  Action(Picasso picasso, T target, Request request, boolean skipCache, boolean noFade,
+      int errorResId, Drawable errorDrawable, String key, Object tag) {
     this.picasso = picasso;
-    this.data = data;
-    this.target = new RequestWeakReference<T>(this, target, picasso.referenceQueue);
+    this.request = request;
+    this.target =
+        target == null ? null : new RequestWeakReference<T>(this, target, picasso.referenceQueue);
     this.skipCache = skipCache;
     this.noFade = noFade;
     this.errorResId = errorResId;
     this.errorDrawable = errorDrawable;
     this.key = key;
+    this.tag = (tag != null ? tag : this);
   }
 
   abstract void complete(Bitmap result, Picasso.LoadedFrom from);
@@ -61,12 +67,12 @@ abstract class Action<T> {
     cancelled = true;
   }
 
-  Request getData() {
-    return data;
+  Request getRequest() {
+    return request;
   }
 
   T getTarget() {
-    return target.get();
+    return target == null ? null : target.get();
   }
 
   String getKey() {
@@ -77,7 +83,19 @@ abstract class Action<T> {
     return cancelled;
   }
 
+  boolean willReplay() {
+    return willReplay;
+  }
+
   Picasso getPicasso() {
     return picasso;
+  }
+
+  Priority getPriority() {
+    return request.priority;
+  }
+
+  Object getTag() {
+    return tag;
   }
 }

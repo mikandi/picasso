@@ -25,8 +25,9 @@ class ImageViewAction extends Action<ImageView> {
   Callback callback;
 
   ImageViewAction(Picasso picasso, ImageView imageView, Request data, boolean skipCache,
-      boolean noFade, int errorResId, Drawable errorDrawable, String key, Callback callback) {
-    super(picasso, imageView, data, skipCache, noFade, errorResId, errorDrawable, key);
+      boolean noFade, int errorResId, Drawable errorDrawable, String key, Object tag,
+      Callback callback) {
+    super(picasso, imageView, data, skipCache, noFade, errorResId, errorDrawable, key, tag);
     this.callback = callback;
   }
 
@@ -42,8 +43,8 @@ class ImageViewAction extends Action<ImageView> {
     }
 
     Context context = picasso.context;
-    boolean debugging = picasso.debugging;
-    PicassoDrawable.setBitmap(target, context, result, from, noFade, debugging);
+    boolean indicatorsEnabled = picasso.indicatorsEnabled;
+    PicassoDrawable.setBitmap(target, context, result, from, noFade, indicatorsEnabled);
 
     if (callback != null) {
       callback.onSuccess();
