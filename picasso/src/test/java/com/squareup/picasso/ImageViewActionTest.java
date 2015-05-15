@@ -44,8 +44,8 @@ public class ImageViewActionTest {
   @Test(expected = AssertionError.class)
   public void throwsErrorWithNullResult() throws Exception {
     ImageViewAction action =
-        new ImageViewAction(mock(Picasso.class), mockImageViewTarget(), null, false, false, 0, null,
-            URI_KEY_1, null, null);
+        new ImageViewAction(mock(Picasso.class), mockImageViewTarget(), null, 0, 0, 0,
+            null, URI_KEY_1, null, null, false);
     action.complete(null, MEMORY);
   }
 
@@ -56,7 +56,8 @@ public class ImageViewActionTest {
     ImageView target = mockImageViewTarget();
     Callback callback = mockCallback();
     ImageViewAction request =
-        new ImageViewAction(picasso, target, null, false, false, 0, null, URI_KEY_1, null, callback);
+        new ImageViewAction(picasso, target, null, 0, 0, 0, null, URI_KEY_1, null,
+            callback, false);
     request.target.clear();
     request.complete(bitmap, MEMORY);
     verifyZeroInteractions(target);
@@ -69,7 +70,8 @@ public class ImageViewActionTest {
     ImageView target = mockImageViewTarget();
     Callback callback = mockCallback();
     ImageViewAction request =
-        new ImageViewAction(picasso, target, null, false, false, 0, null, URI_KEY_1, null, callback);
+        new ImageViewAction(picasso, target, null, 0, 0, 0, null, URI_KEY_1, null,
+            callback, false);
     request.target.clear();
     request.error();
     verifyZeroInteractions(target);
@@ -81,11 +83,12 @@ public class ImageViewActionTest {
     Bitmap bitmap = makeBitmap();
     Picasso picasso =
         new Picasso(Robolectric.application, mock(Dispatcher.class), Cache.NONE, null, IDENTITY,
-            null, mock(Stats.class), false, false);
+            null, mock(Stats.class), Bitmap.Config.ARGB_8888, false, false);
     ImageView target = mockImageViewTarget();
     Callback callback = mockCallback();
     ImageViewAction request =
-        new ImageViewAction(picasso, target, null, false, false, 0, null, URI_KEY_1, null, callback);
+        new ImageViewAction(picasso, target, null, 0, 0, 0, null, URI_KEY_1, null,
+            callback, false);
     request.complete(bitmap, MEMORY);
     verify(target).setImageDrawable(any(PicassoDrawable.class));
     verify(callback).onSuccess();
@@ -97,8 +100,8 @@ public class ImageViewActionTest {
     Callback callback = mockCallback();
     Picasso mock = mock(Picasso.class);
     ImageViewAction request =
-        new ImageViewAction(mock, target, null, false, false, RESOURCE_ID_1, null, null, null,
-            callback);
+        new ImageViewAction(mock, target, null, 0, 0, RESOURCE_ID_1, null, null, null,
+            callback, false);
     request.error();
     verify(target).setImageResource(RESOURCE_ID_1);
     verify(callback).onError();
@@ -110,8 +113,8 @@ public class ImageViewActionTest {
     Callback callback = mockCallback();
     Picasso mock = mock(Picasso.class);
     ImageViewAction request =
-        new ImageViewAction(mock, target, null, false, false, RESOURCE_ID_1, null, null, null,
-            callback);
+        new ImageViewAction(mock, target, null, 0, 0, RESOURCE_ID_1, null, null, null,
+            callback, false);
     request.error();
     verify(target).setImageResource(RESOURCE_ID_1);
     verify(callback).onError();
@@ -124,8 +127,8 @@ public class ImageViewActionTest {
     Callback callback = mockCallback();
     Picasso mock = mock(Picasso.class);
     ImageViewAction request =
-        new ImageViewAction(mock, target, null, false, false, 0, errorDrawable, URI_KEY_1, null,
-            callback);
+        new ImageViewAction(mock, target, null, 0, 0, 0, errorDrawable, URI_KEY_1, null,
+            callback, false);
     request.error();
     verify(target).setImageDrawable(errorDrawable);
     verify(callback).onError();
@@ -137,7 +140,8 @@ public class ImageViewActionTest {
     ImageView target = mockImageViewTarget();
     Callback callback = mockCallback();
     ImageViewAction request =
-        new ImageViewAction(picasso, target, null, false, false, 0, null, URI_KEY_1, null, callback);
+        new ImageViewAction(picasso, target, null, 0, 0, 0, null, URI_KEY_1, null,
+            callback, false);
     request.cancel();
     assertThat(request.callback).isNull();
   }

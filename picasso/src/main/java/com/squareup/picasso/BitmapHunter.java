@@ -16,9 +16,11 @@
 package com.squareup.picasso;
 
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.net.NetworkInfo;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ import java.util.List;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.squareup.picasso.MemoryPolicy.shouldReadFromMemoryCache;
 import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
 import static com.squareup.picasso.Picasso.Priority;
 import static com.squareup.picasso.Picasso.Priority.LOW;
@@ -59,8 +62,8 @@ class BitmapHunter implements Runnable {
       return true;
     }
 
-    @Override public Result load(Request data) throws IOException {
-      throw new IllegalStateException("Unrecognized type of request: " + data);
+    @Override public Result load(Request request, int networkPolicy) throws IOException {
+      throw new IllegalStateException("Unrecognized type of request: " + request);
     }
   };
 
@@ -71,7 +74,8 @@ class BitmapHunter implements Runnable {
   final Stats stats;
   final String key;
   final Request data;
-  final boolean skipMemoryCache;
+  final int memoryPolicy;
+  int networkPolicy;
   final RequestHandler requestHandler;
 
   Action action;
@@ -95,9 +99,55 @@ class BitmapHunter implements Runnable {
     this.key = action.getKey();
     this.data = action.getRequest();
     this.priority = action.getPriority();
-    this.skipMemoryCache = action.skipCache;
+    this.memoryPolicy = action.getMemoryPolicy();
+    this.networkPolicy = action.getNetworkPolicy();
     this.requestHandler = requestHandler;
     this.retryCount = requestHandler.getRetryCount();
+  }
+
+  /**
+   * Decode a byte stream into a Bitmap. This method will take into account additional information
+   * about the supplied request in order to do the decoding efficiently (such as through leveraging
+   * {@code inSampleSize}).
+   */
+  static Bitmap decodeStream(InputStream stream, Request request) throws IOException {
+    MarkableInputStream markStream = new MarkableInputStream(stream);
+    stream = markStream;
+
+    long mark = markStream.savePosition(65536); // TODO fix this crap.
+
+    final BitmapFactory.Options options = RequestHandler.createBitmapOptions(request);
+    final boolean calculateSize = RequestHandler.requiresInSampleSize(options);
+
+    boolean isWebPFile = Utils.isWebPFile(stream);
+    boolean isPurgeable = request.purgeable && android.os.Build.VERSION.SDK_INT < 21;
+    markStream.reset(mark);
+    // We decode from a byte array because, a) when decoding a WebP network stream, BitmapFactory
+    // throws a JNI Exception, so we workaround by decoding a byte array, or b) user requested
+    // purgeable, which only affects bitmaps decoded from byte arrays.
+    if (isWebPFile || isPurgeable) {
+      byte[] bytes = Utils.toByteArray(stream);
+      if (calculateSize) {
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+        RequestHandler.calculateInSampleSize(request.targetWidth, request.targetHeight, options,
+            request);
+      }
+      return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+    } else {
+      if (calculateSize) {
+        BitmapFactory.decodeStream(stream, null, options);
+        RequestHandler.calculateInSampleSize(request.targetWidth, request.targetHeight, options,
+            request);
+
+        markStream.reset(mark);
+      }
+      Bitmap bitmap = BitmapFactory.decodeStream(stream, null, options);
+      if (bitmap == null) {
+        // Treat null as an IO exception, we will eventually retry.
+        throw new IOException("Failed to decode stream.");
+      }
+      return bitmap;
+    }
   }
 
   @Override public void run() {
@@ -120,6 +170,9 @@ class BitmapHunter implements Runnable {
         exception = e;
       }
       dispatcher.dispatchFailed(this);
+    } catch (NetworkRequestHandler.ContentLengthException e) {
+      exception = e;
+      dispatcher.dispatchRetry(this);
     } catch (IOException e) {
       exception = e;
       dispatcher.dispatchRetry(this);
@@ -139,7 +192,7 @@ class BitmapHunter implements Runnable {
   Bitmap hunt() throws IOException {
     Bitmap bitmap = null;
 
-    if (!skipMemoryCache) {
+    if (shouldReadFromMemoryCache(memoryPolicy)) {
       bitmap = cache.get(key);
       if (bitmap != null) {
         stats.dispatchCacheHit();
@@ -151,12 +204,23 @@ class BitmapHunter implements Runnable {
       }
     }
 
-    data.loadFromLocalCacheOnly = (retryCount == 0);
-    RequestHandler.Result result = requestHandler.load(data);
+    data.networkPolicy = retryCount == 0 ? NetworkPolicy.OFFLINE.index : networkPolicy;
+    RequestHandler.Result result = requestHandler.load(data, networkPolicy);
     if (result != null) {
-      bitmap = result.getBitmap();
       loadedFrom = result.getLoadedFrom();
       exifRotation = result.getExifOrientation();
+
+      bitmap = result.getBitmap();
+
+      // If there was no Bitmap then we need to decode it from the stream.
+      if (bitmap == null) {
+        InputStream is = result.getStream();
+        try {
+          bitmap = decodeStream(is, data);
+        } finally {
+          Utils.closeQuietly(is);
+        }
+      }
     }
 
     if (bitmap != null) {
@@ -279,10 +343,6 @@ class BitmapHunter implements Runnable {
     return future != null && future.isCancelled();
   }
 
-  boolean shouldSkipMemoryCache() {
-    return skipMemoryCache;
-  }
-
   boolean shouldRetry(boolean airplaneMode, NetworkInfo info) {
     boolean hasRetries = retryCount > 0;
     if (!hasRetries) {
@@ -302,6 +362,10 @@ class BitmapHunter implements Runnable {
 
   String getKey() {
     return key;
+  }
+
+  int getMemoryPolicy() {
+    return memoryPolicy;
   }
 
   Request getData() {
@@ -424,6 +488,7 @@ class BitmapHunter implements Runnable {
   static Bitmap transformResult(Request data, Bitmap result, int exifRotation) {
     int inWidth = result.getWidth();
     int inHeight = result.getHeight();
+    boolean onlyScaleDown = data.onlyScaleDown;
 
     int drawX = 0;
     int drawY = 0;
@@ -448,24 +513,30 @@ class BitmapHunter implements Runnable {
       if (data.centerCrop) {
         float widthRatio = targetWidth / (float) inWidth;
         float heightRatio = targetHeight / (float) inHeight;
-        float scale;
+        float scaleX, scaleY;
         if (widthRatio > heightRatio) {
-          scale = widthRatio;
           int newSize = (int) Math.ceil(inHeight * (heightRatio / widthRatio));
           drawY = (inHeight - newSize) / 2;
           drawHeight = newSize;
+          scaleX = widthRatio;
+          scaleY = targetHeight / (float) drawHeight;
         } else {
-          scale = heightRatio;
           int newSize = (int) Math.ceil(inWidth * (widthRatio / heightRatio));
           drawX = (inWidth - newSize) / 2;
           drawWidth = newSize;
+          scaleX = targetWidth / (float) drawWidth;
+          scaleY = heightRatio;
         }
-        matrix.preScale(scale, scale);
+        if (shouldResize(onlyScaleDown, inWidth, inHeight, targetWidth, targetHeight)) {
+          matrix.preScale(scaleX, scaleY);
+        }
       } else if (data.centerInside) {
         float widthRatio = targetWidth / (float) inWidth;
         float heightRatio = targetHeight / (float) inHeight;
         float scale = widthRatio < heightRatio ? widthRatio : heightRatio;
-        matrix.preScale(scale, scale);
+        if (shouldResize(onlyScaleDown, inWidth, inHeight, targetWidth, targetHeight)) {
+          matrix.preScale(scale, scale);
+        }
       } else if ((targetWidth != 0 || targetHeight != 0) //
           && (targetWidth != inWidth || targetHeight != inHeight)) {
         // If an explicit target size has been specified and they do not match the results bounds,
@@ -475,7 +546,9 @@ class BitmapHunter implements Runnable {
             targetWidth != 0 ? targetWidth / (float) inWidth : targetHeight / (float) inHeight;
         float sy =
             targetHeight != 0 ? targetHeight / (float) inHeight : targetWidth / (float) inWidth;
-        matrix.preScale(sx, sy);
+        if (shouldResize(onlyScaleDown, inWidth, inHeight, targetWidth, targetHeight)) {
+          matrix.preScale(sx, sy);
+        }
       }
     }
 
@@ -491,5 +564,10 @@ class BitmapHunter implements Runnable {
     }
 
     return result;
+  }
+
+  private static boolean shouldResize(boolean onlyScaleDown, int inWidth, int inHeight,
+      int targetWidth, int targetHeight) {
+    return !onlyScaleDown || inWidth > targetWidth || inHeight > targetHeight;
   }
 }

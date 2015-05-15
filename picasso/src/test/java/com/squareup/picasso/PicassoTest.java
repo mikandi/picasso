@@ -17,8 +17,10 @@ package com.squareup.picasso;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.net.Uri;
 import android.widget.ImageView;
 import android.widget.RemoteViews;
+import java.io.File;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.ExecutorService;
@@ -30,6 +32,7 @@ import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
+import static android.graphics.Bitmap.Config.ARGB_8888;
 import static com.squareup.picasso.Picasso.Listener;
 import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
 import static com.squareup.picasso.RemoteViewsAction.RemoteViewsTarget;
@@ -72,8 +75,8 @@ public class PicassoTest {
 
   @Before public void setUp() {
     initMocks(this);
-    picasso = new Picasso(context, dispatcher, cache, listener, transformer, null,
-        stats, false, false);
+    picasso = new Picasso(context, dispatcher, cache, listener, transformer, null, stats, ARGB_8888,
+        false, false);
   }
 
   @Test public void submitWithNullTargetInvokesDispatcher() throws Exception {
@@ -185,7 +188,6 @@ public class PicassoTest {
     Action action = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
     BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
     when(hunter.getAction()).thenReturn(action);
-    boolean caught = false;
     try {
       picasso.complete(hunter);
       fail("Calling complete() with null LoadedFrom should throw");
@@ -301,6 +303,17 @@ public class PicassoTest {
       picasso.shutdown();
       fail("Calling shutdown() on static singleton instance should throw");
     } catch (UnsupportedOperationException expected) {
+    }
+  }
+
+  @Test public void setSingletonInstanceRejectsNull() {
+    Picasso.singleton = null;
+
+    try {
+      Picasso.setSingletonInstance(null);
+      fail("Can't set singleton instance to null.");
+    } catch (IllegalArgumentException e) {
+      assertThat(e).hasMessage("Picasso must not be null.");
     }
   }
 
@@ -460,7 +473,8 @@ public class PicassoTest {
     } catch (IllegalArgumentException expected) {
     }
     try {
-      new Picasso.Builder(context).addRequestHandler(requestHandler).addRequestHandler(requestHandler);
+      new Picasso.Builder(context).addRequestHandler(requestHandler)
+          .addRequestHandler(requestHandler);
       fail("Registering same request handler twice should throw exception.");
     } catch (IllegalStateException expected) {
     }
@@ -472,7 +486,8 @@ public class PicassoTest {
   }
 
   @Test public void builderWithRequestHandler() throws Exception {
-    Picasso picasso = new Picasso.Builder(Robolectric.application).addRequestHandler(requestHandler).build();
+    Picasso picasso = new Picasso.Builder(Robolectric.application)
+        .addRequestHandler(requestHandler).build();
     assertThat(picasso.getRequestHandlers()).isNotNull().isNotEmpty().contains(requestHandler);
   }
 
@@ -487,5 +502,20 @@ public class PicassoTest {
   @Test public void builderWithDebugIndicators() throws Exception {
     Picasso picasso = new Picasso.Builder(Robolectric.application).indicatorsEnabled(true).build();
     assertThat(picasso.areIndicatorsEnabled()).isTrue();
+  }
+
+  @Test public void invalidateString() {
+    picasso.invalidate("http://example.com");
+    verify(cache).clearKeyUri("http://example.com");
+  }
+
+  @Test public void invalidateFile() {
+    picasso.invalidate(new File("/foo/bar/baz"));
+    verify(cache).clearKeyUri("file:///foo/bar/baz");
+  }
+
+  @Test public void invalidateUri() {
+    picasso.invalidate(Uri.parse("mock://12345"));
+    verify(cache).clearKeyUri("mock://12345");
   }
 }

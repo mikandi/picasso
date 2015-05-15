@@ -39,8 +39,10 @@ import static com.squareup.picasso.Action.RequestWeakReference;
 import static com.squareup.picasso.Dispatcher.HUNTER_BATCH_COMPLETE;
 import static com.squareup.picasso.Dispatcher.REQUEST_BATCH_RESUME;
 import static com.squareup.picasso.Dispatcher.REQUEST_GCED;
+import static com.squareup.picasso.MemoryPolicy.shouldReadFromMemoryCache;
 import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
 import static com.squareup.picasso.Utils.OWNER_MAIN;
+import static com.squareup.picasso.Utils.THREAD_LEAK_CLEANING_MS;
 import static com.squareup.picasso.Utils.THREAD_PREFIX;
 import static com.squareup.picasso.Utils.VERB_CANCELED;
 import static com.squareup.picasso.Utils.VERB_COMPLETED;
@@ -126,6 +128,7 @@ public class Picasso {
         }
         case REQUEST_BATCH_RESUME:
           @SuppressWarnings("unchecked") List<Action> batch = (List<Action>) msg.obj;
+          //noinspection ForLoopReplaceableByForEach
           for (int i = 0, n = batch.size(); i < n; i++) {
             Action action = batch.get(i);
             action.picasso.resumeAction(action);
@@ -137,7 +140,7 @@ public class Picasso {
     }
   };
 
-  static Picasso singleton = null;
+  static volatile Picasso singleton = null;
 
   private final Listener listener;
   private final RequestTransformer requestTransformer;
@@ -151,6 +154,7 @@ public class Picasso {
   final Map<Object, Action> targetToAction;
   final Map<ImageView, DeferredRequestCreator> targetToDeferredRequestCreator;
   final ReferenceQueue<Object> referenceQueue;
+  final Bitmap.Config defaultBitmapConfig;
 
   boolean indicatorsEnabled;
   volatile boolean loggingEnabled;
@@ -158,13 +162,14 @@ public class Picasso {
   boolean shutdown;
 
   Picasso(Context context, Dispatcher dispatcher, Cache cache, Listener listener,
-      RequestTransformer requestTransformer, List<RequestHandler> extraRequestHandlers,
-      Stats stats, boolean indicatorsEnabled, boolean loggingEnabled) {
+      RequestTransformer requestTransformer, List<RequestHandler> extraRequestHandlers, Stats stats,
+      Bitmap.Config defaultBitmapConfig, boolean indicatorsEnabled, boolean loggingEnabled) {
     this.context = context;
     this.dispatcher = dispatcher;
     this.cache = cache;
     this.listener = listener;
     this.requestTransformer = requestTransformer;
+    this.defaultBitmapConfig = defaultBitmapConfig;
 
     int builtInHandlers = 7; // Adjust this as internal handlers are added or removed.
     int extraCount = (extraRequestHandlers != null ? extraRequestHandlers.size() : 0);
@@ -223,6 +228,7 @@ public class Picasso {
   public void cancelTag(Object tag) {
     checkMain();
     List<Action> actions = new ArrayList<Action>(targetToAction.values());
+    //noinspection ForLoopReplaceableByForEach
     for (int i = 0, n = actions.size(); i < n; i++) {
       Action action = actions.get(i);
       if (action.getTag().equals(tag)) {
@@ -328,6 +334,46 @@ public class Picasso {
   }
 
   /**
+   * Invalidate all memory cached images for the specified {@code uri}.
+   *
+   * @see #invalidate(String)
+   * @see #invalidate(File)
+   */
+  public void invalidate(Uri uri) {
+    if (uri == null) {
+      throw new IllegalArgumentException("uri == null");
+    }
+    cache.clearKeyUri(uri.toString());
+  }
+
+  /**
+   * Invalidate all memory cached images for the specified {@code path}. You can also pass a
+   * {@linkplain RequestCreator#stableKey stable key}.
+   *
+   * @see #invalidate(Uri)
+   * @see #invalidate(File)
+   */
+  public void invalidate(String path) {
+    if (path == null) {
+      throw new IllegalArgumentException("path == null");
+    }
+    invalidate(Uri.parse(path));
+  }
+
+  /**
+   * Invalidate all memory cached images for the specified {@code file}.
+   *
+   * @see #invalidate(Uri)
+   * @see #invalidate(String)
+   */
+  public void invalidate(File file) {
+    if (file == null) {
+      throw new IllegalArgumentException("file == null");
+    }
+    invalidate(Uri.fromFile(file));
+  }
+
+  /**
    * {@code true} if debug display, logging, and statistics are enabled.
    * <p>
    * @deprecated Use {@link #areIndicatorsEnabled()} and {@link #isLoggingEnabled()} instead.
@@ -362,6 +408,7 @@ public class Picasso {
    * <b>WARNING:</b> Enabling this will result in excessive object allocation. This should be only
    * be used for debugging Picasso behavior. Do NOT pass {@code BuildConfig.DEBUG}.
    */
+  @SuppressWarnings("UnusedDeclaration") // Public API.
   public void setLoggingEnabled(boolean enabled) {
     loggingEnabled = enabled;
   }
@@ -478,7 +525,7 @@ public class Picasso {
 
   void resumeAction(Action action) {
     Bitmap bitmap = null;
-    if (!action.skipCache) {
+    if (shouldReadFromMemoryCache(action.memoryPolicy)) {
       bitmap = quickMemoryCacheCheck(action.getKey());
     }
 
@@ -537,11 +584,16 @@ public class Picasso {
     }
   }
 
+  /**
+   * When the target of an action is weakly reachable but the request hasn't been canceled, it
+   * gets added to the reference queue. This thread empties the reference queue and cancels the
+   * request.
+   */
   private static class CleanupThread extends Thread {
-    private final ReferenceQueue<?> referenceQueue;
+    private final ReferenceQueue<Object> referenceQueue;
     private final Handler handler;
 
-    CleanupThread(ReferenceQueue<?> referenceQueue, Handler handler) {
+    CleanupThread(ReferenceQueue<Object> referenceQueue, Handler handler) {
       this.referenceQueue = referenceQueue;
       this.handler = handler;
       setDaemon(true);
@@ -552,8 +604,21 @@ public class Picasso {
       Process.setThreadPriority(THREAD_PRIORITY_BACKGROUND);
       while (true) {
         try {
-          RequestWeakReference<?> remove = (RequestWeakReference<?>) referenceQueue.remove();
-          handler.sendMessage(handler.obtainMessage(REQUEST_GCED, remove.action));
+          // Prior to Android 5.0, even when there is no local variable, the result from
+          // remove() & obtainMessage() is kept as a stack local variable.
+          // We're forcing this reference to be cleared and replaced by looping every second
+          // when there is nothing to do.
+          // This behavior has been tested and reproduced with heap dumps.
+          RequestWeakReference<?> remove =
+              (RequestWeakReference<?>) referenceQueue.remove(THREAD_LEAK_CLEANING_MS);
+          Message message = handler.obtainMessage();
+          if (remove != null) {
+            message.what = REQUEST_GCED;
+            message.obj = remove.action;
+            handler.sendMessage(message);
+          } else {
+            message.recycle();
+          }
         } catch (InterruptedException e) {
           break;
         } catch (final Exception e) {
@@ -607,6 +672,9 @@ public class Picasso {
    * This method must be called before any calls to {@link #with} and may only be called once.
    */
   public static void setSingletonInstance(Picasso picasso) {
+    if (picasso == null) {
+      throw new IllegalArgumentException("Picasso must not be null.");
+    }
     synchronized (Picasso.class) {
       if (singleton != null) {
         throw new IllegalStateException("Singleton instance already exists.");
@@ -625,6 +693,7 @@ public class Picasso {
     private Listener listener;
     private RequestTransformer transformer;
     private List<RequestHandler> requestHandlers;
+    private Bitmap.Config defaultBitmapConfig;
 
     private boolean indicatorsEnabled;
     private boolean loggingEnabled;
@@ -635,6 +704,18 @@ public class Picasso {
         throw new IllegalArgumentException("Context must not be null.");
       }
       this.context = context.getApplicationContext();
+    }
+
+    /**
+     * Specify the default {@link Bitmap.Config} used when decoding images. This can be overridden
+     * on a per-request basis using {@link RequestCreator#config(Bitmap.Config) config(..)}.
+     */
+    public Builder defaultBitmapConfig(Bitmap.Config bitmapConfig) {
+      if (bitmapConfig == null) {
+        throw new IllegalArgumentException("Bitmap config must not be null.");
+      }
+      this.defaultBitmapConfig = bitmapConfig;
+      return this;
     }
 
     /** Specify the {@link Downloader} that will be used for downloading images. */
@@ -767,8 +848,8 @@ public class Picasso {
 
       Dispatcher dispatcher = new Dispatcher(context, service, HANDLER, downloader, cache, stats);
 
-      return new Picasso(context, dispatcher, cache, listener, transformer,
-          requestHandlers, stats, indicatorsEnabled, loggingEnabled);
+      return new Picasso(context, dispatcher, cache, listener, transformer, requestHandlers, stats,
+          defaultBitmapConfig, indicatorsEnabled, loggingEnabled);
     }
   }
 

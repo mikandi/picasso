@@ -22,6 +22,7 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.os.Handler;
 import android.os.Message;
+import com.squareup.picasso.NetworkRequestHandler.ContentLengthException;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import org.junit.Before;
@@ -38,12 +39,14 @@ import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 import static android.net.ConnectivityManager.CONNECTIVITY_ACTION;
 import static com.squareup.picasso.Dispatcher.NetworkBroadcastReceiver;
 import static com.squareup.picasso.Dispatcher.NetworkBroadcastReceiver.EXTRA_AIRPLANE_STATE;
+import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
 import static com.squareup.picasso.TestUtils.URI_1;
 import static com.squareup.picasso.TestUtils.URI_2;
 import static com.squareup.picasso.TestUtils.URI_KEY_1;
 import static com.squareup.picasso.TestUtils.URI_KEY_2;
 import static com.squareup.picasso.TestUtils.makeBitmap;
 import static com.squareup.picasso.TestUtils.mockAction;
+import static com.squareup.picasso.TestUtils.mockCallback;
 import static com.squareup.picasso.TestUtils.mockHunter;
 import static com.squareup.picasso.TestUtils.mockNetworkInfo;
 import static com.squareup.picasso.TestUtils.mockPicasso;
@@ -73,7 +76,7 @@ public class DispatcherTest {
   @Mock Cache cache;
   @Mock Stats stats;
   private Dispatcher dispatcher;
-  
+
   final Bitmap bitmap1 = makeBitmap();
   final Bitmap bitmap2 = makeBitmap();
 
@@ -147,15 +150,55 @@ public class DispatcherTest {
     assertThat(dispatcher.pausedActions).isEmpty();
 
     FetchAction fetchAction1 =
-        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), false, URI_KEY_1,
-            pausedTag);
+        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), 0, 0, pausedTag,
+            URI_KEY_1, null);
     FetchAction fetchAction2 =
-        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), false, URI_KEY_1,
-            pausedTag);
+        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), 0, 0, pausedTag,
+            URI_KEY_1, null);
     dispatcher.performSubmit(fetchAction1);
     dispatcher.performSubmit(fetchAction2);
 
     assertThat(dispatcher.pausedActions).hasSize(2);
+  }
+
+  @Test public void performSubmitWithFetchActionWithSuccessCompletionCallback() {
+    String pausedTag = "pausedTag";
+    Callback callback = mockCallback();
+
+    FetchAction fetchAction =
+        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), 0, 0, pausedTag,
+            URI_KEY_1, callback);
+    dispatcher.performSubmit(fetchAction);
+    fetchAction.complete(bitmap1, MEMORY);
+
+    verify(callback).onSuccess();
+  }
+
+  @Test public void performSubmitWithFetchActionWithErrorCompletionCallback() {
+    String pausedTag = "pausedTag";
+    Callback callback = mockCallback();
+
+    FetchAction fetchAction =
+        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), 0, 0, pausedTag,
+            URI_KEY_1, callback);
+    dispatcher.performSubmit(fetchAction, false);
+    fetchAction.error();
+
+    verify(callback).onError();
+  }
+
+  @Test public void performCancelWithFetchActionWithCallback() {
+    String pausedTag = "pausedTag";
+    dispatcher.pausedTags.add(pausedTag);
+    assertThat(dispatcher.pausedActions).isEmpty();
+    Callback callback = mockCallback();
+
+    FetchAction fetchAction1 =
+        new FetchAction(mockPicasso(), new Request.Builder(URI_1).build(), 0, 0, pausedTag,
+            URI_KEY_1, callback);
+    dispatcher.performCancel(fetchAction1);
+    fetchAction1.cancel();
+    assertThat(dispatcher.pausedActions).isEmpty();
   }
 
   @Test public void performCancelDetachesRequestAndCleansUp() {
@@ -199,13 +242,15 @@ public class DispatcherTest {
   }
 
   @Test public void performCompleteSetsResultInCache() {
-    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap1, false);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap1, 0, null);
     dispatcher.performComplete(hunter);
     verify(cache).set(hunter.getKey(), hunter.getResult());
   }
 
-  @Test public void performCompleteWithSkipCacheDoesNotCache() {
-    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap1, true);
+  @Test public void performCompleteWithNoStoreMemoryPolicy() {
+    int memoryPolicy = 0;
+    memoryPolicy |= MemoryPolicy.NO_STORE.index;
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap1, memoryPolicy, null);
     dispatcher.performComplete(hunter);
     assertThat(dispatcher.hunterMap).isEmpty();
     verifyZeroInteractions(cache);
@@ -259,6 +304,16 @@ public class DispatcherTest {
     verifyZeroInteractions(service);
     assertThat(dispatcher.hunterMap).isEmpty();
     assertThat(dispatcher.failedActions).isEmpty();
+  }
+
+  @Test public void performRetryForContentLengthResetsNetworkPolicy() {
+    NetworkInfo networkInfo = mockNetworkInfo(true);
+    BitmapHunter hunter = mockHunter(URI_KEY_2, bitmap1, false);
+    when(hunter.shouldRetry(anyBoolean(), any(NetworkInfo.class))).thenReturn(true);
+    when(hunter.getException()).thenReturn(new ContentLengthException("304 error"));
+    when(connectivityManager.getActiveNetworkInfo()).thenReturn(networkInfo);
+    dispatcher.performRetry(hunter);
+    assertThat(NetworkPolicy.shouldReadFromDiskCache(hunter.networkPolicy)).isFalse();
   }
 
   @Test public void performRetryDoesNotMarkForReplayIfNotSupported() {

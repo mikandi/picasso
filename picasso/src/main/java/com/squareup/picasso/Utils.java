@@ -22,7 +22,9 @@ import android.content.Context;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
+import android.os.Handler;
 import android.os.Looper;
+import android.os.Message;
 import android.os.Process;
 import android.os.StatFs;
 import android.provider.Settings;
@@ -38,6 +40,7 @@ import java.util.concurrent.ThreadFactory;
 import static android.content.Context.ACTIVITY_SERVICE;
 import static android.content.pm.ApplicationInfo.FLAG_LARGE_HEAP;
 import static android.os.Build.VERSION.SDK_INT;
+import static android.os.Build.VERSION_CODES.GINGERBREAD;
 import static android.os.Build.VERSION_CODES.HONEYCOMB;
 import static android.os.Build.VERSION_CODES.HONEYCOMB_MR1;
 import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
@@ -48,12 +51,15 @@ import static java.lang.String.format;
 final class Utils {
   static final String THREAD_PREFIX = "Picasso-";
   static final String THREAD_IDLE_NAME = THREAD_PREFIX + "Idle";
-  static final int DEFAULT_READ_TIMEOUT = 20 * 1000; // 20s
-  static final int DEFAULT_CONNECT_TIMEOUT = 15 * 1000; // 15s
+  static final int DEFAULT_READ_TIMEOUT_MILLIS = 20 * 1000; // 20s
+  static final int DEFAULT_WRITE_TIMEOUT_MILLIS = 20 * 1000; // 20s
+  static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 15 * 1000; // 15s
   private static final String PICASSO_CACHE = "picasso-cache";
   private static final int KEY_PADDING = 50; // Determined by exact science.
   private static final int MIN_DISK_CACHE_SIZE = 5 * 1024 * 1024; // 5MB
   private static final int MAX_DISK_CACHE_SIZE = 50 * 1024 * 1024; // 50MB
+  static final int THREAD_LEAK_CLEANING_MS = 1000;
+  static final char KEY_SEPARATOR = '\n';
 
   /** Thread confined to main thread for key creation. */
   static final StringBuilder MAIN_THREAD_KEY_BUILDER = new StringBuilder();
@@ -111,6 +117,13 @@ final class Utils {
       throw new IllegalStateException("Negative size: " + bitmap);
     }
     return result;
+  }
+
+  static <T> T checkNotNull(T value, String message) {
+    if (value == null) {
+      throw new NullPointerException(message);
+    }
+    return value;
   }
 
   static void checkNotMain() {
@@ -175,30 +188,30 @@ final class Utils {
       builder.ensureCapacity(KEY_PADDING);
       builder.append(data.resourceId);
     }
-    builder.append('\n');
+    builder.append(KEY_SEPARATOR);
 
     if (data.rotationDegrees != 0) {
       builder.append("rotation:").append(data.rotationDegrees);
       if (data.hasRotationPivot) {
         builder.append('@').append(data.rotationPivotX).append('x').append(data.rotationPivotY);
       }
-      builder.append('\n');
+      builder.append(KEY_SEPARATOR);
     }
     if (data.hasSize()) {
       builder.append("resize:").append(data.targetWidth).append('x').append(data.targetHeight);
-      builder.append('\n');
+      builder.append(KEY_SEPARATOR);
     }
     if (data.centerCrop) {
-      builder.append("centerCrop\n");
+      builder.append("centerCrop").append(KEY_SEPARATOR);
     } else if (data.centerInside) {
-      builder.append("centerInside\n");
+      builder.append("centerInside").append(KEY_SEPARATOR);
     }
 
     if (data.transformations != null) {
       //noinspection ForLoopReplaceableByForEach
       for (int i = 0, count = data.transformations.size(); i < count; i++) {
         builder.append(data.transformations.get(i).key());
-        builder.append('\n');
+        builder.append(KEY_SEPARATOR);
       }
     }
 
@@ -233,41 +246,14 @@ final class Utils {
   }
 
   static Downloader createDefaultDownloader(Context context) {
-    boolean okUrlFactory = false;
-    try {
-      Class.forName("com.squareup.okhttp.OkUrlFactory");
-      okUrlFactory = true;
-    } catch (ClassNotFoundException ignored) {
+    if (SDK_INT >= GINGERBREAD) {
+        try {
+          Class.forName("com.squareup.okhttp.OkHttpClient");
+          return OkHttpLoaderCreator.create(context);
+        } catch (ClassNotFoundException ignored) {
+        }
     }
-
-    boolean okHttpClient = false;
-    try {
-      Class.forName("com.squareup.okhttp.OkHttpClient");
-      okHttpClient = true;
-    } catch (ClassNotFoundException ignored) {
-    }
-
-    if (okHttpClient != okUrlFactory) {
-      throw new RuntimeException(""
-          + "Picasso detected an unsupported OkHttp on the classpath.\n"
-          + "To use OkHttp with this version of Picasso, you'll need:\n"
-          + "1. com.squareup.okhttp:okhttp:1.6.0 (or newer)\n"
-          + "2. com.squareup.okhttp:okhttp-urlconnection:1.6.0 (or newer)\n"
-          + "Note that OkHttp 2.0.0+ is supported!");
-    }
-
-    return okHttpClient
-        ? OkHttpLoaderCreator.create(context)
-        : new UrlConnectionDownloader(context);
-  }
-
-  static void sneakyRethrow(Throwable t) {
-    Utils.<Error>sneakyThrow2(t);
-  }
-
-  @SuppressWarnings("unchecked")
-  private static <T extends Throwable> void sneakyThrow2(Throwable t) throws T {
-    throw (T) t;
+    return new UrlConnectionDownloader(context);
   }
 
   static File createDefaultCacheDir(Context context) {
@@ -388,6 +374,20 @@ final class Utils {
     } catch (PackageManager.NameNotFoundException e) {
       throw new FileNotFoundException("Unable to obtain resources for package: " + data.uri);
     }
+  }
+
+  /**
+   * Prior to Android 5, HandlerThread always keeps a stack local reference to the last message
+   * that was sent to it. This method makes sure that stack local reference never stays there
+   * for too long by sending new messages to it every second.
+   */
+  static void flushStackLocalLeaks(Looper looper) {
+    Handler handler = new Handler(looper) {
+      @Override public void handleMessage(Message msg) {
+        sendMessageDelayed(obtainMessage(), THREAD_LEAK_CLEANING_MS);
+      }
+    };
+    handler.sendMessageDelayed(handler.obtainMessage(), THREAD_LEAK_CLEANING_MS);
   }
 
   @TargetApi(HONEYCOMB)

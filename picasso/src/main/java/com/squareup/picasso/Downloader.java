@@ -26,14 +26,13 @@ public interface Downloader {
    * Download the specified image {@code url} from the internet.
    *
    * @param uri Remote image URL.
-   * @param localCacheOnly If {@code true} the URL should only be loaded if available in a local
-   * disk cache.
+   * @param networkPolicy The {@link NetworkPolicy} used for this request.
    * @return {@link Response} containing either a {@link Bitmap} representation of the request or an
    * {@link InputStream} for the image data. {@code null} can be returned to indicate a problem
    * loading the bitmap.
    * @throws IOException if the requested URL cannot successfully be loaded.
    */
-  Response load(Uri uri, boolean localCacheOnly) throws IOException;
+  Response load(Uri uri, int networkPolicy) throws IOException;
 
   /**
    * Allows to perform a clean up for this {@link Downloader} including closing the disk cache and
@@ -46,9 +45,9 @@ public interface Downloader {
     final boolean localCacheOnly;
     final int responseCode;
 
-    public ResponseException(String message, boolean localCacheOnly, int responseCode) {
+    public ResponseException(String message, int networkPolicy, int responseCode) {
       super(message);
-      this.localCacheOnly = localCacheOnly;
+      this.localCacheOnly = NetworkPolicy.isOfflineOnly(networkPolicy);
       this.responseCode = responseCode;
     }
   }
@@ -65,7 +64,9 @@ public interface Downloader {
      *
      * @param bitmap Image.
      * @param loadedFromCache {@code true} if the source of the image is from a local disk cache.
+     * @deprecated Use {@link RequestHandler} for directly loading {@link Bitmap} instances.
      */
+    @Deprecated
     public Response(Bitmap bitmap, boolean loadedFromCache) {
       if (bitmap == null) {
         throw new IllegalArgumentException("Bitmap may not be null.");
@@ -134,7 +135,10 @@ public interface Downloader {
      * Bitmap representing the image.
      * <p>
      * If this returns {@code null}, image data will be available via {@link #getInputStream()}.
+     *
+     * @deprecated Use {@link RequestHandler} for directly loading {@link Bitmap} instances.
      */
+    @Deprecated
     public Bitmap getBitmap() {
       return bitmap;
     }

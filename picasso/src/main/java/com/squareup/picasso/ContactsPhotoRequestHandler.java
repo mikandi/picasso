@@ -19,11 +19,8 @@ import android.annotation.TargetApi;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.UriMatcher;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.provider.ContactsContract;
-
 import java.io.IOException;
 import java.io.InputStream;
 
@@ -57,7 +54,7 @@ class ContactsPhotoRequestHandler extends RequestHandler {
     matcher.addURI(ContactsContract.AUTHORITY, "display_photo/#", ID_DISPLAY_PHOTO);
   }
 
-  final Context context;
+  private final Context context;
 
   ContactsPhotoRequestHandler(Context context) {
     this.context = context;
@@ -67,17 +64,12 @@ class ContactsPhotoRequestHandler extends RequestHandler {
     final Uri uri = data.uri;
     return (SCHEME_CONTENT.equals(uri.getScheme())
         && ContactsContract.Contacts.CONTENT_URI.getHost().equals(uri.getHost())
-        && !uri.getPathSegments().contains(ContactsContract.Contacts.Photo.CONTENT_DIRECTORY));
+        && matcher.match(data.uri) != UriMatcher.NO_MATCH);
   }
 
-  @Override public Result load(Request data) throws IOException {
-    InputStream is = null;
-    try {
-      is = getInputStream(data);
-      return new Result(decodeStream(is, data), DISK);
-    } finally {
-      Utils.closeQuietly(is);
-    }
+  @Override public Result load(Request request, int networkPolicy) throws IOException {
+    InputStream is = getInputStream(request);
+    return is != null ? new Result(is, DISK) : null;
   }
 
   private InputStream getInputStream(Request data) throws IOException {
@@ -102,23 +94,6 @@ class ContactsPhotoRequestHandler extends RequestHandler {
       default:
         throw new IllegalStateException("Invalid uri: " + uri);
     }
-  }
-
-  private Bitmap decodeStream(InputStream stream, Request data) throws IOException {
-    if (stream == null) {
-      return null;
-    }
-    final BitmapFactory.Options options = createBitmapOptions(data);
-    if (requiresInSampleSize(options)) {
-      InputStream is = getInputStream(data);
-      try {
-        BitmapFactory.decodeStream(is, null, options);
-      } finally {
-        Utils.closeQuietly(is);
-      }
-      calculateInSampleSize(data.targetWidth, data.targetHeight, options, data);
-    }
-    return BitmapFactory.decodeStream(stream, null, options);
   }
 
   @TargetApi(ICE_CREAM_SANDWICH)

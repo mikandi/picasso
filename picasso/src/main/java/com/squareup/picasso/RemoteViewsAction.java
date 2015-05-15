@@ -31,9 +31,8 @@ abstract class RemoteViewsAction extends Action<RemoteViewsAction.RemoteViewsTar
   private RemoteViewsTarget target;
 
   RemoteViewsAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-      int errorResId, boolean skipCache, String key, Object tag) {
-    super(picasso, null, data, skipCache, false, errorResId,
-        null, key, tag);
+      int errorResId, int memoryPolicy, int networkPolicy, Object tag, String key) {
+    super(picasso, null, data, memoryPolicy, networkPolicy, errorResId, null, key, tag, false);
     this.remoteViews = remoteViews;
     this.viewId = viewId;
   }
@@ -89,8 +88,9 @@ abstract class RemoteViewsAction extends Action<RemoteViewsAction.RemoteViewsTar
     private final int[] appWidgetIds;
 
     AppWidgetAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-        int[] appWidgetIds, boolean skipCache, int errorResId, String key, Object tag) {
-      super(picasso, data, remoteViews, viewId, errorResId, skipCache, key, tag);
+        int[] appWidgetIds, int memoryPolicy, int networkPolicy, String key, Object tag,
+        int errorResId) {
+      super(picasso, data, remoteViews, viewId, errorResId, memoryPolicy, networkPolicy, tag, key);
       this.appWidgetIds = appWidgetIds;
     }
 
@@ -102,19 +102,21 @@ abstract class RemoteViewsAction extends Action<RemoteViewsAction.RemoteViewsTar
 
   static class NotificationAction extends RemoteViewsAction {
     private final int notificationId;
+    private final String notificationTag;
     private final Notification notification;
 
     NotificationAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-        int notificationId, Notification notification, boolean skipCache, int errorResId,
-        String key, Object tag) {
-      super(picasso, data, remoteViews, viewId, errorResId, skipCache, key, tag);
+        int notificationId, Notification notification, String notificationTag, int memoryPolicy,
+        int networkPolicy, String key, Object tag, int errorResId) {
+      super(picasso, data, remoteViews, viewId, errorResId, memoryPolicy, networkPolicy, tag, key);
       this.notificationId = notificationId;
+      this.notificationTag = notificationTag;
       this.notification = notification;
     }
 
     @Override void update() {
       NotificationManager manager = getService(picasso.context, NOTIFICATION_SERVICE);
-      manager.notify(notificationId, notification);
+      manager.notify(notificationTag, notificationId, notification);
     }
   }
 }

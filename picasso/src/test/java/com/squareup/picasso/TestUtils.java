@@ -25,9 +25,6 @@ import android.net.Uri;
 import android.view.ViewTreeObserver;
 import android.widget.ImageView;
 import android.widget.RemoteViews;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
-
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,12 +33,14 @@ import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
 import static android.content.ContentResolver.SCHEME_ANDROID_RESOURCE;
+import static android.graphics.Bitmap.Config.ARGB_8888;
 import static android.provider.ContactsContract.Contacts.CONTENT_URI;
 import static android.provider.ContactsContract.Contacts.Photo.CONTENT_DIRECTORY;
 import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
 import static com.squareup.picasso.Picasso.Priority;
 import static com.squareup.picasso.Utils.createKey;
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyInt;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -67,10 +66,10 @@ class TestUtils {
       createKey(new Request.Builder(MEDIA_STORE_CONTENT_1_URL).build());
   static final Uri CONTENT_1_URL = Uri.parse("content://zip/zap/zoop.jpg");
   static final String CONTENT_KEY_1 = createKey(new Request.Builder(CONTENT_1_URL).build());
-  static final Uri CONTACT_URI_1 = CONTENT_URI.buildUpon().path("1234").build();
+  static final Uri CONTACT_URI_1 = CONTENT_URI.buildUpon().appendPath("1234").build();
   static final String CONTACT_KEY_1 = createKey(new Request.Builder(CONTACT_URI_1).build());
   static final Uri CONTACT_PHOTO_URI_1 =
-      CONTENT_URI.buildUpon().path("1234").path(CONTENT_DIRECTORY).build();
+      CONTENT_URI.buildUpon().appendPath("1234").appendPath(CONTENT_DIRECTORY).build();
   static final String CONTACT_PHOTO_KEY_1 =
       createKey(new Request.Builder(CONTACT_PHOTO_URI_1).build());
   static final int RESOURCE_ID_1 = 1;
@@ -93,7 +92,7 @@ class TestUtils {
   static final String RESOURCE_TYPE_URI_KEY =
       createKey(new Request.Builder(RESOURCE_TYPE_URI).build());
   static final Uri CUSTOM_URI = Uri.parse("foo://bar");
-  static final String CUSTOM_URI_KEY = createKey(new Request.Builder(CUSTOM_URI).build());;
+  static final String CUSTOM_URI_KEY = createKey(new Request.Builder(CUSTOM_URI).build());
 
   static Context mockPackageResourceContext() {
     Context context = mock(Context.class);
@@ -136,7 +135,7 @@ class TestUtils {
 
   static Action mockAction(String key, Uri uri, Object target, int resourceId, Priority priority,
                            String tag) {
-    Request request = new Request.Builder(uri, resourceId).build();
+    Request request = new Request.Builder(uri, resourceId, ARGB_8888).build();
     return mockAction(key, request, target, priority, tag);
   }
 
@@ -222,14 +221,18 @@ class TestUtils {
   }
 
   static BitmapHunter mockHunter(String key, Bitmap result, boolean skipCache, Action action) {
+    int memoryPolicy = skipCache ? MemoryPolicy.NO_STORE.index | MemoryPolicy.NO_CACHE.index : 0;
+    return mockHunter(key, result, memoryPolicy, action);
+  }
+
+  static BitmapHunter mockHunter(String key, Bitmap result, int memoryPolicy, Action action) {
     Request data = new Request.Builder(URI_1).build();
     BitmapHunter hunter = mock(BitmapHunter.class);
     when(hunter.getKey()).thenReturn(key);
     when(hunter.getResult()).thenReturn(result);
     when(hunter.getData()).thenReturn(data);
-    when(hunter.shouldSkipMemoryCache()).thenReturn(skipCache);
+    when(hunter.getMemoryPolicy()).thenReturn(memoryPolicy);
     when(hunter.getAction()).thenReturn(action);
-
     Picasso picasso = mockPicasso();
     when(hunter.getPicasso()).thenReturn(picasso);
 
@@ -242,7 +245,7 @@ class TestUtils {
     try {
       Bitmap defaultResult = makeBitmap();
       RequestHandler.Result result = new RequestHandler.Result(defaultResult, MEMORY);
-      when(requestHandler.load(any(Request.class))).thenReturn(result);
+      when(requestHandler.load(any(Request.class), anyInt())).thenReturn(result);
       when(requestHandler.canHandleRequest(any(Request.class))).thenReturn(true);
     } catch (IOException e) {
       throw new RuntimeException(e);

@@ -14,16 +14,18 @@ Download
 
 Download [the latest JAR][2] or grab via Gradle:
 ```groovy
-compile 'com.squareup.picasso:picasso:2.4.0'
+compile 'com.squareup.picasso:picasso:2.5.2'
 ```
 or Maven:
 ```xml
 <dependency>
   <groupId>com.squareup.picasso</groupId>
   <artifactId>picasso</artifactId>
-  <version>2.4.0</version>
+  <version>2.5.2</version>
 </dependency>
 ```
+
+Snapshots of the development version are available in [Sonatype's `snapshots` repository][snap].
 
 
 
@@ -57,3 +59,4 @@ License
 
  [1]: http://square.github.io/picasso/
  [2]: https://search.maven.org/remote_content?g=com.squareup.picasso&a=picasso&v=LATEST
+ [snap]: https://oss.sonatype.org/content/repositories/snapshots/
